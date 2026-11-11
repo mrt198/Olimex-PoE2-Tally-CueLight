@@ -1,0 +1,8 @@
+{
+  "name": "Olimex ESP-PoE2 Tally \u0026 Cue Light",
+  "description": "Firmware port and configuration suite for Olimex ESP32-PoE2 Board and Waveshare 1.69inch Touch LCD Module",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
