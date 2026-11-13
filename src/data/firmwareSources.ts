@@ -83,15 +83,15 @@ if (M5.BtnA.wasClicked()) {
 if (M5.BtnA.wasDoubleClicked()) {
   currentScreen = !currentScreen;
 }`,
-    adapted: `// Olimex + Waveshare 1.69": Debounced CST816T Capacitive Touch
+    adapted: `// Olimex + Waveshare 1.69": Responsive CST816T Capacitive Touch
 void processTouchEvents() {
-  // Poll every 20ms while INT==LOW or finger is held (INT pulses briefly)
+  // Fast 10ms polling while INT==LOW or finger is held
   if (digitalRead(PIN_TOUCH_INT) == LOW || touch.isPressed) {
     readCST816TRegisters(0x01, &gesture, &points, &x, &y); // I2C 0x15 (33/32)
     if (points >= 1 && points <= 2) {
-      // Reject lift-off chatter (<95ms after release) so single taps never double-trigger
-      if (!touch.isPressed && (now - touch.lastReleaseTime) >= 95) {
-        if (touch.tapCount == 1 && (now - touch.firstTapTime) <= 420) {
+      // Reject lift-off chatter (<60ms after release) so single taps never double-trigger
+      if (!touch.isPressed && (now - touch.lastReleaseTime) >= 60) {
+        if (touch.tapCount == 1 && (now - touch.firstTapTime) <= 240) {
           handleScreenDoubleTap(); // Toggles Screen 0 <-> Screen 1 Diagnostics
         } else {
           touch.isPressed = true;
@@ -99,16 +99,16 @@ void processTouchEvents() {
       } else if (held > 1200) {
         handleScreenLongPress(); // Cycles display brightness
       }
-    } else if (touch.isPressed && ++touch.releaseZeroCount >= 2) { // 40ms confirm
+    } else if (touch.isPressed && ++touch.releaseZeroCount >= 2) { // 20ms confirm
       touch.isPressed = false;
       touch.tapCount = 1;
     }
   }
-  if (touch.tapCount == 1 && !touch.isPressed && (now - touch.firstTapTime >= 420)) {
-    handleScreenSingleTap(); // TSL return, ETC/Promptside ACK, MIDI return, NMOS
+  if (touch.tapCount == 1 && !touch.isPressed && (now - touch.firstTapTime >= 240)) {
+    handleScreenSingleTap(); // Fast TSL return, ETC/Promptside ACK, MIDI return, NMOS
   }
 }`,
-    explanation: 'The Waveshare 1.69" module replaces the mechanical button with a CST816T capacitive touch screen. A 2-frame (40ms) release filter and 95ms inter-tap bounce guard prevent capacitive lift chatter from firing false double-taps, keeping Single Tap crisp and Double Tap deliberate.'
+    explanation: 'The Waveshare 1.69" module replaces the mechanical button with a CST816T capacitive touch screen. A 10ms poll rate, 2-frame (20ms) release filter, 60ms inter-tap bounce guard, and snappy 240ms double-tap window send Program/Preview return tallies with minimal lag while blocking false lift chatter.'
   },
   {
     category: 'Battery Charge Level & Status Readout',
@@ -165,12 +165,13 @@ if (ETH.linkUp()) {
   {
     category: 'Promptside, MSC rtpMIDI, MTC Timecode & MIDI Button Return',
     original: `// Original Base Firmware: 11 modes, SNTP clock only, passive rtpMIDI`,
-    adapted: `// Updated 13-Mode Universal Stack:
+    adapted: `// Updated 14-Mode Universal Stack:
 // - Mode 7: Promptside (UDP 8000 /promptside/channel/<ch>/standby|go|off|text)
 // - Mode 8: MSC_RTP_MIDI (RP-002 SysEx 01 GO, 02 STOP, 0B STANDBY+ with cue #)
+// - Mode 14: vMix Tally (TCP API 8099 SUBSCRIBE TALLY + Preview/Active trigger)
 // - Global MTC Reader: Decodes 0xF1 Quarter-Frame & SysEx Full-Frame HH:MM:SS:FF
 // - Global MIDI Return Action: Note/CC/PC transmitted on Single Tap`,
-    explanation: 'All updates from the M5AtomS3R reference firmware are integrated: Promptside theatrical wing cue lights, MIDI Show Control (MSC RP-002) over AppleMIDI, live SMPTE MTC timecode header readout, and configurable MIDI button return feedback.'
+    explanation: 'All updates from the M5AtomS3R reference firmware are integrated: Promptside theatrical wing cue lights, MIDI Show Control (MSC RP-002) over AppleMIDI, native vMix TCP API tally (port 8099), live SMPTE MTC timecode header readout, and configurable MIDI button return feedback.'
   },
   {
     category: '250ms P2P Heartbeat, POSIX Timezones, Power Eco & Shared I2C ENV',
@@ -181,5 +182,26 @@ if (ETH.linkUp()) {
 // 3. Power & Thermal Eco: 80/160/240 MHz CPU scaling, waiti idle yield, 10% Auto-Dim
 // 4. External SHT30 (0x44) + BMP280 (0x76) ENV sensor on shared I2C (GPIO 33/32)`,
     explanation: 'Includes sub-second P2P disconnect fault detection, automatic DST timezone rules, 80 MHz PoE Eco thermal management with instant wake on cue/touch, and optional external SHT30/BMP280 environment telemetry exposed via /api/env alongside /api/battery and /api/power.'
+  },
+  {
+    category: 'Wi-Fi AP Scanner (/wifi), rtpMIDI mDNS & Separate MTC Receiver (/rtpmidi)',
+    original: `// Single shared UDP socket on 5004 & Wi-Fi locked off during PoE`,
+    adapted: `// 1. /wifi: Temporarily wakes Wi-Fi STA for async AP scan even while PoE RF=OFF
+// 2. /rtpmidi: Independent _apple-midi._udp mDNS registration & discovery
+mdns_service_add(inst.c_str(), "_apple-midi", "_udp", 5004, txt, 2); // Mode RX
+mdns_service_add(mtcInst.c_str(), "_apple-midi", "_udp", 5006, txt, 2); // MTC RX
+// Separate UDP sockets prevent Tally/MSC vs MTC host/port collisions`,
+    explanation: 'Adds a dedicated /wifi page that can wake the STA radio to scan nearby 2.4 GHz APs even when PoE shuts Wi-Fi down, plus a /rtpmidi setup portal registering separate _apple-midi._udp mDNS sessions for Tally/MSC (5004/5005) and global MTC Timecode (5006/5007).'
+  },
+  {
+    category: 'vMix TCP API Tally (Port 8099) & Core 0 Non-Blocking Mutex',
+    original: `// Core 1 connectToServer() & synchronous TCP sockets can stall touch/LCD`,
+    adapted: `// Core 0 socketTask() runs Socket.IO + handleVmixSocketLoop() (TCP 8099):
+vmixClient.connect(host, 8099, 1500);
+vmixClient.print("SUBSCRIBE TALLY\\r\\n");
+// Thread-safe shared state guard between Core 0 & Core 1:
+xSemaphoreTake(taStateMutex, pdMS_TO_TICKS(15));
+ArduinoOTA.setMdnsEnabled(false); // Avoid mDNS collision with ESPmDNS`,
+    explanation: 'Adds native vMix Live Production Switcher Tally (Mode 14) on TCP port 8099 with optional PreviewInput/ActiveInput single-tap triggers, isolates TCP reconnects onto Core 0 with taStateMutex guards, prevents mDNS collisions with ArduinoOTA, and avoids redundant ETH.config() lease drops on /save.'
   }
 ];

@@ -182,7 +182,7 @@ export const HardwareSpecs: React.FC = () => {
 
             <div className="p-3 bg-neutral-950 rounded-xl border border-neutral-800 space-y-2">
               <div className="flex items-center justify-between text-amber-400 font-bold">
-                <span>👆👆 Double Tap (&lt;350ms):</span>
+                <span>👆👆 Double Tap (&lt;240ms):</span>
                 <span className="text-white">Toggle Diagnostics Page</span>
               </div>
               <p className="text-[11px] text-neutral-400">

@@ -73,7 +73,7 @@ The Olimex ESP32-PoE2 includes an onboard **Microchip MCP73831 LiPo battery char
 
 ---
 
-## 🎯 13 Supported Operating Modes & Global Features
+## 🎯 14 Supported Operating Modes & Global Features
 
 1. **TP (TA)** — Technical Producer with Tally Arbiter (Single Tap sends TSL 3.1 Program `0x32`)
 2. **Presenter (TA)** — Presenter with Tally Arbiter (Single Tap sends TSL 3.1 Preview `0x31`)
@@ -88,6 +88,7 @@ The Olimex ESP32-PoE2 includes an onboard **Microchip MCP73831 LiPo battery char
 11. **TSL_31** — TSL UMD v3.1 dedicated listener (UDP/TCP, centered source name)
 12. **TSL_50** — TSL UMD v5.0 dedicated listener (UDP/TCP, 4 tally bits + UTF-8 name)
 13. **OSC_CueLight** — RSMCK OSC Cue Light for iOS (UDP 53000, persistent banner + `/ack`)
+14. **vMix** — vMix Live Production Tally (TCP API port 8099 `SUBSCRIBE TALLY`, Program Red / Preview Green + optional `PreviewInput`/`ActiveInput` tap trigger)
 
 **Global Features:**
 * **POSIX Timezone SNTP Clock** (automatic DST rules) & **MTC Timecode Reader** (`0xF1` Quarter-Frame & SysEx Full-Frame `HH:MM:SS:FF`)

@@ -56,6 +56,9 @@ export interface SimulatorState {
   staticGW: string;
   staticDNS: string;
   wifiDisabledForEth: boolean;
+  wifiSsid: string;
+  wifiPass: string;
+  wifiKeepOnWithPoE: boolean;
 
   // Olimex ESP32-PoE2 Battery & Power System
   batteryVoltage: number; // Volts (3.0V - 4.25V)
@@ -71,9 +74,14 @@ export interface SimulatorState {
   // Timezone & Clock Configuration
   timezone: string;
   customTZPosix: string;
-  // MTC (MIDI Time Code) Reader
+  // Separate MTC (MIDI Time Code) Receiver (Independent from rtpMIDI Mode)
   mtcReaderEnabled: boolean;
   mtcTimecode: string;
+  mtcPort: number;
+  mtcSessionName: string;
+  mtcMdnsEnabled: boolean;
+  mtcPeerHost: string;
+  mtcPeerPort: number;
   // AtomENV Sensor
   envSensorEnabled: boolean;
   envTemperature: number;
@@ -141,6 +149,10 @@ export interface SimulatorState {
   nmosAux: boolean; // Aux (Amber)
   // rtpMIDI / AppleMIDI Configuration & State
   rtpMidiPort: number;
+  rtpMidiSessionName: string;
+  rtpMidiMdnsEnabled: boolean;
+  rtpMidiPeerHost: string;
+  rtpMidiPeerPort: number;
   rtpMidiChannel: number; // 0 = Omni, 1-16
   rtpMidiTriggerType: number; // 0 = Note On/Off, 1 = CC, 2 = PC
   rtpMidiNumRed: number;
@@ -459,7 +471,7 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
         });
         setClickTimer(null);
         setClickCount(0);
-      }, 280);
+      }, 240);
       setClickTimer(timer);
     }
   };
@@ -876,12 +888,16 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                             </div>
                           </div>
 
-                          <div>Ethernet: <span className="font-bold">LAN8720A RMII (10/100M)</span></div>
+                          <div>Wi-Fi: <span className="font-bold">{state.ethernetCableConnected && !state.wifiKeepOnWithPoE ? 'RF OFF (PoE)' : (state.wifiSsid || 'Standby')}</span></div>
                           <div>IP: <span className="font-bold">{displayedIP}</span> ({state.useDHCP ? 'DHCP' : 'Static'})</div>
                           <div>Mode: <span className="font-bold underline">{state.operatingMode}</span></div>
                           <div>Touch: <span className="font-bold text-cyan-300">CST816T (I2C 0x15)</span></div>
-                          <div>Gestures: <span className="font-bold">1-Tap=Btn | 2-Tap=Diag</span></div>
                           <div>CPU: <span className="font-bold">{state.cpuFrequency} MHz</span> | Rot: <span className="font-bold">{state.imuRotation}&deg;</span></div>
+                          {state.mtcReaderEnabled && (
+                            <div className="text-amber-300 font-bold truncate">
+                              MTC RX: UDP {state.mtcPort} ({state.mtcTimecode})
+                            </div>
+                          )}
                           {state.envSensorEnabled && (
                             <div className="text-emerald-300 font-bold">
                               ENV: {state.envTemperature.toFixed(1)}C | {state.envHumidity.toFixed(0)}% | {state.envPressure.toFixed(0)}hPa
@@ -898,6 +914,8 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                             <div>TSL 3.1: <span>Port {state.tsl31Port} (Addr: {state.tsl31Address || 'All'})</span></div>
                           ) : state.operatingMode === 'TSL_50' ? (
                             <div>TSL 5.0: <span>Port {state.tsl50Port} (Idx: {state.tsl50Index || 'All'})</span></div>
+                          ) : (state.operatingMode === 'RTP_MIDI' || state.operatingMode === 'MSC_RTP_MIDI') ? (
+                            <div>rtpMIDI RX: <span>UDP {state.operatingMode === 'MSC_RTP_MIDI' ? state.mscPort : state.rtpMidiPort} ({state.rtpMidiSessionName})</span></div>
                           ) : (
                             <div>TA Server: <span>{state.taHost}:{state.taPort}</span></div>
                           )}

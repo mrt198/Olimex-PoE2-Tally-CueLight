@@ -15,7 +15,13 @@ import {
   Music,
   Volume2,
   MessageSquare,
-  Zap
+  Zap,
+  Wifi,
+  WifiOff,
+  Lock,
+  Trash2,
+  RefreshCw,
+  Send
 } from 'lucide-react';
 import { SimulatorState } from './AtomSimulator';
 
@@ -33,7 +39,23 @@ interface DiscoveredPeer {
   mode: string;
 }
 
+interface DiscoveredWifiAp {
+  ssid: string;
+  rssi: number;
+  channel: number;
+  secure: boolean;
+}
+
+interface DiscoveredMidiEndpoint {
+  name: string;
+  hostname: string;
+  ip: string;
+  port: number;
+  roleHint: 'daw' | 'tally' | 'mtc';
+}
+
 export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setState }) => {
+  const [portalPage, setPortalPage] = useState<'dashboard' | 'wifi' | 'rtpmidi'>('dashboard');
   const [formMode, setFormMode] = useState(state.operatingMode);
   const [formDHCP, setFormDHCP] = useState(state.useDHCP);
   const [formStaticIP, setFormStaticIP] = useState(state.staticIP);
@@ -79,6 +101,13 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
   const [formOscCuePort, setFormOscCuePort] = useState(state.oscCuePort);
   const [formOscCueStation, setFormOscCueStation] = useState(state.oscCueStation);
   const [formOscCueBanner, setFormOscCueBanner] = useState(state.oscCueBanner);
+
+  // vMix Live Production Tally (TCP API 8099)
+  const [formVmixHost, setFormVmixHost] = useState(state.vmixHost);
+  const [formVmixPort, setFormVmixPort] = useState(state.vmixPort);
+  const [formVmixInput, setFormVmixInput] = useState(state.vmixInput);
+  const [formVmixLabel, setFormVmixLabel] = useState(state.vmixLabel);
+  const [formVmixBtnAction, setFormVmixBtnAction] = useState(state.vmixBtnAction);
 
   // rtpMIDI
   const [formRtpPort, setFormRtpPort] = useState(state.rtpMidiPort);
@@ -130,6 +159,29 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
   const [isScanning, setIsScanning] = useState(false);
   const [discoveredPeers, setDiscoveredPeers] = useState<DiscoveredPeer[] | null>(null);
 
+  // /wifi page state
+  const [formWifiSsid, setFormWifiSsid] = useState(state.wifiSsid);
+  const [formWifiPass, setFormWifiPass] = useState(state.wifiPass);
+  const [formWifiKeepOn, setFormWifiKeepOn] = useState(state.wifiKeepOnWithPoE);
+  const [isScanningWifi, setIsScanningWifi] = useState(false);
+  const [wifiScanNotice, setWifiScanNotice] = useState<string | null>(null);
+  const [discoveredAps, setDiscoveredAps] = useState<DiscoveredWifiAp[] | null>(null);
+  const [wifiSaveMsg, setWifiSaveMsg] = useState<string | null>(null);
+
+  // /rtpmidi page state (separate Tally/MSC receiver vs separate MTC receiver)
+  const [formRtpSessName, setFormRtpSessName] = useState(state.rtpMidiSessionName);
+  const [formRtpMdns, setFormRtpMdns] = useState(state.rtpMidiMdnsEnabled);
+  const [formRtpPeerHost, setFormRtpPeerHost] = useState(state.rtpMidiPeerHost);
+  const [formRtpPeerPort, setFormRtpPeerPort] = useState(state.rtpMidiPeerPort);
+  const [formMtcPort, setFormMtcPort] = useState(state.mtcPort);
+  const [formMtcSessName, setFormMtcSessName] = useState(state.mtcSessionName);
+  const [formMtcMdns, setFormMtcMdns] = useState(state.mtcMdnsEnabled);
+  const [formMtcPeerHost, setFormMtcPeerHost] = useState(state.mtcPeerHost);
+  const [formMtcPeerPort, setFormMtcPeerPort] = useState(state.mtcPeerPort);
+  const [isDiscoveringMidi, setIsDiscoveringMidi] = useState(false);
+  const [discoveredMidiPeers, setDiscoveredMidiPeers] = useState<DiscoveredMidiEndpoint[] | null>(null);
+  const [midiSaveMsg, setMidiSaveMsg] = useState<string | null>(null);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setState(prev => ({
@@ -173,6 +225,11 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
       oscCuePort: formOscCuePort,
       oscCueStation: formOscCueStation,
       oscCueBanner: formOscCueBanner,
+      vmixHost: formVmixHost,
+      vmixPort: formVmixPort,
+      vmixInput: formVmixInput,
+      vmixLabel: formVmixLabel,
+      vmixBtnAction: formVmixBtnAction,
       promptsidePort: formPromptsidePort,
       promptsideChannel: formPromptsideChannel,
       promptsideWingLabel: formPromptsideWingLabel,
@@ -250,9 +307,113 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
     setTimeout(() => setSavedSuccess(false), 2000);
   };
 
+  const handleScanWifi = () => {
+    const radioWasOff = state.ethernetCableConnected && !formWifiKeepOn;
+    setIsScanningWifi(true);
+    setDiscoveredAps(null);
+    setWifiScanNotice(
+      radioWasOff
+        ? 'Wi-Fi RF is OFF for PoE Eco mode — temporarily waking STA radio to scan 2.4 GHz APs...'
+        : 'Scanning nearby 2.4 GHz Wi-Fi Access Points...'
+    );
+    setTimeout(() => {
+      setIsScanningWifi(false);
+      setDiscoveredAps([
+        { ssid: 'Studio-Production-WiFi', rssi: -46, channel: 6, secure: true },
+        { ssid: 'FOH-Lighting-Control', rssi: -58, channel: 1, secure: true },
+        { ssid: 'Stage-Tech-5GHz-Bridge', rssi: -64, channel: 11, secure: true },
+        { ssid: 'Venue-Guest-Open', rssi: -77, channel: 3, secure: false }
+      ]);
+      setWifiScanNotice(
+        radioWasOff
+          ? 'Scan complete. Wi-Fi radio automatically returned to OFF state to preserve PoE thermal savings.'
+          : 'Scan complete. Click an Access Point below to populate SSID.'
+      );
+    }, 650);
+  };
+
+  const handleSaveWifi = (e: React.FormEvent) => {
+    e.preventDefault();
+    setState(prev => ({
+      ...prev,
+      wifiSsid: formWifiSsid,
+      wifiPass: formWifiPass,
+      wifiKeepOnWithPoE: formWifiKeepOn,
+      wifiDisabledForEth: prev.ethernetCableConnected && !formWifiKeepOn
+    }));
+    setWifiSaveMsg(
+      state.ethernetCableConnected && !formWifiKeepOn
+        ? 'Saved to NVS! Credentials are ready for automatic failover if PoE Ethernet is unplugged.'
+        : 'Saved to NVS and Wi-Fi STA connection initiated.'
+    );
+    setTimeout(() => setWifiSaveMsg(null), 3000);
+  };
+
+  const handleForgetWifi = () => {
+    setFormWifiSsid('');
+    setFormWifiPass('');
+    setState(prev => ({
+      ...prev,
+      wifiSsid: '',
+      wifiPass: ''
+    }));
+    setWifiSaveMsg('Saved Wi-Fi credentials cleared from NVS.');
+    setTimeout(() => setWifiSaveMsg(null), 2500);
+  };
+
+  const handleDiscoverMidiPeers = () => {
+    setIsDiscoveringMidi(true);
+    setDiscoveredMidiPeers(null);
+    setTimeout(() => {
+      setIsDiscoveringMidi(false);
+      setDiscoveredMidiPeers([
+        { name: 'MacBookPro-QLab-Show', hostname: 'mbp-qlab.local', ip: '192.168.1.40', port: 5004, roleHint: 'daw' },
+        { name: 'Timecode-Master-Reaper', hostname: 'daw-tc.local', ip: '192.168.1.82', port: 5004, roleHint: 'mtc' },
+        { name: 'Lighting-Console-rtpMIDI', hostname: 'eos-midi.local', ip: '192.168.1.55', port: 5008, roleHint: 'tally' }
+      ]);
+    }, 600);
+  };
+
+  const handleAssignMidiPeer = (role: 'tally' | 'mtc', endpoint: DiscoveredMidiEndpoint) => {
+    if (role === 'tally') {
+      setFormRtpPeerHost(endpoint.ip);
+      setFormRtpPeerPort(endpoint.port);
+      setState(prev => ({ ...prev, rtpMidiPeerHost: endpoint.ip, rtpMidiPeerPort: endpoint.port }));
+      setMidiSaveMsg(`Sent AppleMIDI IN invitation from ${formRtpSessName} -> ${endpoint.ip}:${endpoint.port} (Mode Receiver)`);
+    } else {
+      setFormMtcPeerHost(endpoint.ip);
+      setFormMtcPeerPort(endpoint.port);
+      setState(prev => ({ ...prev, mtcPeerHost: endpoint.ip, mtcPeerPort: endpoint.port }));
+      setMidiSaveMsg(`Sent AppleMIDI IN invitation from ${formMtcSessName} -> ${endpoint.ip}:${endpoint.port} (Separate MTC Receiver)`);
+    }
+    setTimeout(() => setMidiSaveMsg(null), 3000);
+  };
+
+  const handleSaveMidiConfig = (e: React.FormEvent) => {
+    e.preventDefault();
+    setState(prev => ({
+      ...prev,
+      rtpMidiPort: formRtpPort,
+      rtpMidiSessionName: formRtpSessName,
+      rtpMidiMdnsEnabled: formRtpMdns,
+      rtpMidiPeerHost: formRtpPeerHost,
+      rtpMidiPeerPort: formRtpPeerPort,
+      mtcReaderEnabled: formMtcReader,
+      mtcPort: formMtcPort,
+      mtcSessionName: formMtcSessName,
+      mtcMdnsEnabled: formMtcMdns,
+      mtcPeerHost: formMtcPeerHost,
+      mtcPeerPort: formMtcPeerPort
+    }));
+    setMidiSaveMsg('rtpMIDI Mode & Separate MTC receivers saved; _apple-midi._udp mDNS updated.');
+    setTimeout(() => setMidiSaveMsg(null), 3000);
+  };
+
   const currentIP = state.useDHCP 
     ? (state.networkMode === 'ETH' ? '192.168.1.185' : '192.168.1.92') 
     : state.staticIP;
+
+  const currentPath = portalPage === 'wifi' ? 'wifi' : portalPage === 'rtpmidi' ? 'rtpmidi' : '';
 
   return (
     <div className="space-y-6">
@@ -267,7 +428,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
             </div>
             <div className="ml-4 flex items-center gap-2 px-3 py-1 bg-neutral-900 rounded-lg border border-neutral-800 text-xs font-mono text-neutral-300 w-64 sm:w-96">
               <Globe className="w-3.5 h-3.5 text-neutral-500" />
-              <span>http://{currentIP}/ (or Olimex-PoE2-CueLX.local)</span>
+              <span>http://{currentIP}/{currentPath}</span>
             </div>
           </div>
 
@@ -277,8 +438,410 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
           </div>
         </div>
 
+        {/* Device Portal Sub-Page Navigation Bar */}
+        <div className="bg-neutral-950/70 px-6 py-2.5 border-b border-neutral-800 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPortalPage('dashboard')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+              portalPage === 'dashboard'
+                ? 'bg-sky-600 text-white shadow'
+                : 'bg-neutral-900 text-neutral-400 hover:text-white border border-neutral-800'
+            }`}
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            <span>/ (Dashboard)</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setPortalPage('wifi')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+              portalPage === 'wifi'
+                ? 'bg-emerald-600 text-white shadow'
+                : 'bg-neutral-900 text-neutral-400 hover:text-white border border-neutral-800'
+            }`}
+          >
+            <Wifi className="w-3.5 h-3.5" />
+            <span>/wifi (Wi-Fi &amp; AP Scan)</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setPortalPage('rtpmidi')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+              portalPage === 'rtpmidi'
+                ? 'bg-purple-600 text-white shadow'
+                : 'bg-neutral-900 text-neutral-400 hover:text-white border border-neutral-800'
+            }`}
+          >
+            <Music className="w-3.5 h-3.5" />
+            <span>/rtpmidi (mDNS &amp; Separate MTC)</span>
+          </button>
+        </div>
+
         {/* Embedded Portal Webpage Mockup */}
         <div className="p-6 max-w-2xl mx-auto space-y-6">
+          {portalPage === 'wifi' && (
+            <div className="space-y-5">
+              <div className="bg-neutral-800/80 border border-neutral-700/60 rounded-xl p-5 shadow-md space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h2 className="text-base font-bold text-sky-400 flex items-center gap-2">
+                      <Wifi className="w-4 h-4" />
+                      <span>Wi-Fi Configuration &amp; Access Point Scanner</span>
+                    </h2>
+                    <p className="text-xs text-neutral-400 mt-0.5">
+                      Scan nearby 2.4 GHz networks even when PoE Ethernet has shut down the Wi-Fi radio.
+                    </p>
+                  </div>
+                  <span className={`px-2.5 py-1 rounded-full text-[11px] font-mono font-bold border ${
+                    state.ethernetCableConnected && !formWifiKeepOn
+                      ? 'bg-blue-950 text-blue-300 border-blue-800'
+                      : 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                  }`}>
+                    {state.ethernetCableConnected && !formWifiKeepOn ? 'RF OFF (PoE Eco)' : 'Wi-Fi STA Ready'}
+                  </span>
+                </div>
+
+                {state.ethernetCableConnected && !formWifiKeepOn && (
+                  <div className="p-3 bg-neutral-900/90 border border-blue-800/60 rounded-lg text-xs text-blue-200 flex items-start gap-2">
+                    <WifiOff className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                    <span>
+                      Wi-Fi is currently OFF because PoE Ethernet is active. Clicking <strong>Scan Access Points</strong> temporarily wakes the ESP32 STA radio, runs the scan, and powers Wi-Fi back down automatically.
+                    </span>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleScanWifi}
+                  disabled={isScanningWifi}
+                  className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isScanningWifi ? 'animate-spin' : ''}`} />
+                  <span>{isScanningWifi ? 'Waking Wi-Fi & Scanning 2.4 GHz APs...' : 'Scan for Wi-Fi Access Points'}</span>
+                </button>
+
+                {wifiScanNotice && (
+                  <div className="text-[11px] font-mono text-cyan-300 bg-neutral-950 px-3 py-2 rounded-lg border border-neutral-800">
+                    {wifiScanNotice}
+                  </div>
+                )}
+
+                {discoveredAps && (
+                  <div className="space-y-2 pt-1">
+                    {discoveredAps.map((ap, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => setFormWifiSsid(ap.ssid)}
+                        className="w-full p-2.5 bg-neutral-900 hover:border-sky-500 border border-neutral-700 rounded-lg flex items-center justify-between text-left transition-colors cursor-pointer"
+                      >
+                        <div>
+                          <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>{ap.ssid}</span>
+                            {ap.secure && <Lock className="w-3 h-3 text-amber-400" />}
+                          </div>
+                          <div className="text-[10.5px] font-mono text-neutral-400 mt-0.5">
+                            Channel {ap.channel} &bull; {ap.secure ? 'WPA2/WPA3' : 'Open'} (Click to select)
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 rounded bg-sky-950 text-sky-300 border border-sky-800 text-[11px] font-mono font-bold">
+                          {ap.rssi} dBm
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <form onSubmit={handleSaveWifi} className="bg-neutral-800/80 border border-neutral-700/60 rounded-xl p-5 shadow-md space-y-4">
+                <h3 className="text-xs font-bold text-neutral-200 uppercase tracking-wider">Saved Wi-Fi Credentials</h3>
+                <div>
+                  <label className="block text-[11px] font-medium text-neutral-400 mb-1">Wi-Fi Network SSID</label>
+                  <input
+                    type="text"
+                    value={formWifiSsid}
+                    onChange={(e) => setFormWifiSsid(e.target.value)}
+                    placeholder="Enter SSID or click an Access Point above"
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-neutral-400 mb-1">Wi-Fi Password (WPA2 / WPA3)</label>
+                  <input
+                    type="password"
+                    value={formWifiPass}
+                    onChange={(e) => setFormWifiPass(e.target.value)}
+                    placeholder="Leave blank for open network"
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-neutral-400 mb-1">Behavior While PoE Ethernet Is Connected</label>
+                  <select
+                    value={formWifiKeepOn ? '1' : '0'}
+                    onChange={(e) => setFormWifiKeepOn(e.target.value === '1')}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-2 text-xs font-mono text-white cursor-pointer"
+                  >
+                    <option value="0">Turn Wi-Fi OFF when PoE Ethernet is active (Coolest / Auto Failover)</option>
+                    <option value="1">Keep Wi-Fi Connected alongside PoE Ethernet</option>
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <button
+                    type="submit"
+                    className="py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Save Wi-Fi Credentials</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleForgetWifi}
+                    className="py-2.5 px-4 bg-red-900/70 hover:bg-red-800 text-red-100 border border-red-700/60 font-semibold rounded-lg text-xs flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Forget Saved Network</span>
+                  </button>
+                </div>
+
+                {wifiSaveMsg && (
+                  <div className="p-3 bg-emerald-950 border border-emerald-700/60 rounded-lg text-xs font-mono text-emerald-300 flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>{wifiSaveMsg}</span>
+                  </div>
+                )}
+              </form>
+            </div>
+          )}
+
+          {portalPage === 'rtpmidi' && (
+            <div className="space-y-5">
+              {/* mDNS Discovery Banner */}
+              <div className="bg-neutral-800/80 border border-neutral-700/60 rounded-xl p-5 shadow-md space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h2 className="text-base font-bold text-purple-400 flex items-center gap-2">
+                      <Search className="w-4 h-4" />
+                      <span>AppleMIDI mDNS Discovery (<code>_apple-midi._udp</code>)</span>
+                    </h2>
+                    <p className="text-xs text-neutral-400 mt-0.5">
+                      Discover DAWs, QLab, macOS Audio MIDI Setup, and lighting consoles, then bind independently to Tally Mode or MTC Timecode.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleDiscoverMidiPeers}
+                  disabled={isDiscoveringMidi}
+                  className="w-full py-2.5 px-4 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Search className={`w-3.5 h-3.5 ${isDiscoveringMidi ? 'animate-spin' : ''}`} />
+                  <span>{isDiscoveringMidi ? 'Querying _apple-midi._udp via mDNS...' : 'Discover _apple-midi._udp Receivers on LAN'}</span>
+                </button>
+
+                {discoveredMidiPeers && (
+                  <div className="space-y-2 pt-1">
+                    {discoveredMidiPeers.map((ep, idx) => (
+                      <div key={idx} className="p-3 bg-neutral-900 border border-neutral-700 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="font-mono">
+                          <div className="text-xs font-bold text-white">{ep.name}</div>
+                          <div className="text-[11px] text-neutral-400">
+                            {ep.ip}:{ep.port} &bull; {ep.hostname}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleAssignMidiPeer('tally', ep)}
+                            className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                          >
+                            <Send className="w-3 h-3" />
+                            <span>Mode Target + Invite</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAssignMidiPeer('mtc', ep)}
+                            className="px-2.5 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                          >
+                            <Send className="w-3 h-3" />
+                            <span>MTC Target + Invite</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <form onSubmit={handleSaveMidiConfig} className="space-y-5">
+                {/* Receiver 1: rtpMIDI / MSC Mode */}
+                <div className="bg-neutral-800/80 border border-indigo-900/50 rounded-xl p-5 shadow-md space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <Music className="w-3.5 h-3.5" />
+                      <span>1. rtpMIDI / MSC Mode Receiver (Tally &amp; Show Control)</span>
+                    </h3>
+                    <span className="text-[10.5px] font-mono px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800">
+                      Ctrl {formRtpPort} / Data {formRtpPort + 1}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">mDNS Instance Name</label>
+                      <input
+                        type="text"
+                        value={formRtpSessName}
+                        onChange={(e) => setFormRtpSessName(e.target.value)}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">Advertise on _apple-midi._udp</label>
+                      <select
+                        value={formRtpMdns ? '1' : '0'}
+                        onChange={(e) => setFormRtpMdns(e.target.value === '1')}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      >
+                        <option value="1">Enabled (Discoverable in macOS/rtpMIDI)</option>
+                        <option value="0">Disabled</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">Local Control Port</label>
+                      <input
+                        type="number"
+                        value={formRtpPort}
+                        onChange={(e) => setFormRtpPort(parseInt(e.target.value) || 5004)}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">Remote Peer Host / IP</label>
+                      <input
+                        type="text"
+                        value={formRtpPeerHost}
+                        onChange={(e) => setFormRtpPeerHost(e.target.value)}
+                        placeholder="Optional initiator IP"
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">Remote Peer Port</label>
+                      <input
+                        type="number"
+                        value={formRtpPeerPort}
+                        onChange={(e) => setFormRtpPeerPort(parseInt(e.target.value) || 5004)}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Receiver 2: Separate MTC Reader */}
+                <div className="bg-neutral-800/80 border border-amber-900/50 rounded-xl p-5 shadow-md space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <Radio className="w-3.5 h-3.5" />
+                      <span>2. Separate MTC Timecode Receiver (All 14 Modes)</span>
+                    </h3>
+                    <span className="text-[10.5px] font-mono px-2 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-800">
+                      Ctrl {formMtcPort} / Data {formMtcPort + 1}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-neutral-400">
+                    Runs on its own UDP socket pair, SSRC (<code>MTC1</code>), and mDNS <code>_apple-midi._udp</code> instance so a dedicated timecode generator can connect independently from your rtpMIDI cue host.
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">MTC Reader State</label>
+                      <select
+                        value={formMtcReader ? '1' : '0'}
+                        onChange={(e) => setFormMtcReader(e.target.value === '1')}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      >
+                        <option value="1">Enabled (Show MTC on Screen 0)</option>
+                        <option value="0">Disabled (Show SNTP Clock)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">MTC mDNS Name</label>
+                      <input
+                        type="text"
+                        value={formMtcSessName}
+                        onChange={(e) => setFormMtcSessName(e.target.value)}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">Broadcast MTC mDNS</label>
+                      <select
+                        value={formMtcMdns ? '1' : '0'}
+                        onChange={(e) => setFormMtcMdns(e.target.value === '1')}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      >
+                        <option value="1">Enabled</option>
+                        <option value="0">Disabled</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">Local MTC Port (Default 5006)</label>
+                      <input
+                        type="number"
+                        value={formMtcPort}
+                        onChange={(e) => setFormMtcPort(parseInt(e.target.value) || 5006)}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">MTC Peer Host / IP</label>
+                      <input
+                        type="text"
+                        value={formMtcPeerHost}
+                        onChange={(e) => setFormMtcPeerHost(e.target.value)}
+                        placeholder="e.g. QLab / DAW IP"
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">MTC Peer Port</label>
+                      <input
+                        type="number"
+                        value={formMtcPeerPort}
+                        onChange={(e) => setFormMtcPeerPort(parseInt(e.target.value) || 5004)}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full mt-2 py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Save &amp; Restart rtpMIDI + Separate MTC Receivers</span>
+                  </button>
+
+                  {midiSaveMsg && (
+                    <div className="p-3 bg-emerald-950 border border-emerald-700/60 rounded-lg text-xs font-mono text-emerald-300 flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>{midiSaveMsg}</span>
+                    </div>
+                  )}
+                </div>
+              </form>
+            </div>
+          )}
+
+          {portalPage === 'dashboard' && (
+          <>
           {/* Status Card */}
           <div className="bg-neutral-800/80 border border-neutral-700/60 rounded-xl p-5 shadow-md">
             <div className="flex items-start justify-between">
@@ -304,6 +867,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
                   {state.operatingMode === 'TP' && 'Program Return (0x32)'}
                   {state.operatingMode === 'Presenter_P2P' && 'P2P Preview Return'}
                   {state.operatingMode === 'TP_P2P' && 'P2P Program Return'}
+                  {state.operatingMode === 'vMix' && 'vMix TCP Tally (8099)'}
                 </span>
               </div>
 
@@ -408,6 +972,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
                   <option value="NMOS_IS07">NMOS IS-07 Event &amp; Tally (SMPTE ST 2110)</option>
                   <option value="RTP_MIDI">rtpMIDI / AppleMIDI Outstation (6 Colors with Priority)</option>
                   <option value="OSC">OSC (Open Sound Control with Scrolling Text Ticker)</option>
+                  <option value="vMix">vMix Tally (TCP API Port 8099)</option>
                 </select>
                 <p className="text-[11px] text-neutral-400 mt-1">
                   {formMode === 'Presenter' && 'Button click transmits Green TSL Preview cue (0x31) back to Tally Arbiter.'}
@@ -423,6 +988,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
                   {formMode === 'NMOS_IS07' && 'AMWA NMOS IS-07: Emits state events for Program, Preview and Aux endpoints over ST 2110.'}
                   {formMode === 'RTP_MIDI' && 'AppleMIDI / rtpMIDI on UDP 5004. Priority: Red > Flashing Red > Green > Yellow > Blue > White.'}
                   {formMode === 'OSC' && 'Open Sound Control on UDP 8000. Supports 6 tally colors plus custom scrolling text ticker.'}
+                  {formMode === 'vMix' && 'Connects via TCP to vMix on port 8099 (SUBSCRIBE TALLY). Shows Red (Program 1) and Green (Preview 2) for the selected Input.'}
                 </p>
               </div>
 
@@ -1494,6 +2060,82 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
                 </div>
               )}
 
+              {/* MODE AWARE SECTION: vMix Live Production Tally */}
+              {formMode === 'vMix' && (
+                <div className="p-4 bg-neutral-900/90 rounded-xl border border-sky-900/50 space-y-3">
+                  <h3 className="text-xs font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Tv className="w-3.5 h-3.5" />
+                    <span>vMix Live Production Tally (TCP API Port 8099)</span>
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">
+                        vMix Workstation Host / IP
+                      </label>
+                      <input
+                        type="text"
+                        value={formVmixHost}
+                        onChange={(e) => setFormVmixHost(e.target.value)}
+                        placeholder="192.168.1.100"
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">
+                        vMix TCP API Port (Default: 8099)
+                      </label>
+                      <input
+                        type="number"
+                        value={formVmixPort}
+                        onChange={(e) => setFormVmixPort(parseInt(e.target.value) || 8099)}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">
+                        vMix Input Number (1 - 999)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={999}
+                        value={formVmixInput}
+                        onChange={(e) => setFormVmixInput(Math.max(1, parseInt(e.target.value) || 1))}
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-neutral-400 mb-1">
+                        Custom Display Label (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={formVmixLabel}
+                        onChange={(e) => setFormVmixLabel(e.target.value)}
+                        placeholder="e.g. CAM 1"
+                        className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-neutral-400 mb-1">
+                      Screen Touch Action (Single Tap)
+                    </label>
+                    <select
+                      value={formVmixBtnAction}
+                      onChange={(e) => setFormVmixBtnAction(parseInt(e.target.value) || 0)}
+                      className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white"
+                    >
+                      <option value={0}>Switch Diagnostics Screen (Safe Default)</option>
+                      <option value={1}>Send Input to Preview (FUNCTION PreviewInput)</option>
+                      <option value={2}>Cut Input to Program (FUNCTION ActiveInput)</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+
               <button
                 type="submit"
                 className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-sm flex items-center justify-center gap-2 transition-colors shadow-lg shadow-blue-900/40 cursor-pointer"
@@ -1569,6 +2211,8 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
                 </div>
               )}
             </div>
+          )}
+          </>
           )}
         </div>
       </div>

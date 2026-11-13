@@ -49,7 +49,7 @@ export function UserManual() {
             </div>
             <p className="text-slate-400 text-sm max-w-2xl">
               Complete engineering manual for the Olimex ESP32-PoE2 + Waveshare 1.69&quot; Touch LCD Broadcast Tally &amp; Theatrical Cue System.
-              Details all 13 operating modes, capacitive touch gestures, battery readout &amp; power telemetry, wiring pinouts, and live APIs.
+              Details all 14 operating modes, capacitive touch gestures, battery readout &amp; power telemetry, wiring pinouts, and live APIs.
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -69,7 +69,7 @@ export function UserManual() {
       {/* Navigation Pills */}
       <div className="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
         {[
-          { id: 'modes', label: '13 Operating Modes', icon: Layers },
+          { id: 'modes', label: '14 Operating Modes', icon: Layers },
           { id: 'touch_battery', label: 'Touch Gestures & Battery', icon: Touchpad },
           { id: 'power', label: 'PoE Thermal & Low Power', icon: Zap },
           { id: 'p2p', label: 'P2P Heartbeat & Alarm', icon: ShieldAlert },
@@ -127,7 +127,7 @@ export function UserManual() {
               <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-2">
                 <div className="flex items-center gap-2 text-amber-400 font-bold text-sm">
                   <Layers className="w-4 h-4" />
-                  <span>Double Tap (&lt;350ms)</span>
+                  <span>Double Tap (&lt;240ms)</span>
                 </div>
                 <div className="text-xs font-semibold text-white">Switch to Diagnostics Page</div>
                 <p className="text-xs text-slate-400">
@@ -154,10 +154,10 @@ export function UserManual() {
               <pre className="text-[11px] text-slate-300 overflow-x-auto">
 {`void processTouchEvents() {
   if (digitalRead(PIN_TOUCH_INT) == LOW || touch.isPressed) {
-    // Polls 0x01..0x06 every 20ms; requires 2 consecutive zero-point reads (~40ms)
-    // to confirm finger lift + 95ms inter-tap guard to prevent bounce double-taps:
-    // - Single Tap (420ms window) -> handleScreenSingleTap() (Button equivalent)
-    // - Double Tap (95..420ms)    -> handleScreenDoubleTap() (Screen 0 <-> Diag)
+    // Polls 0x01..0x06 every 10ms; requires 2 consecutive zero-point reads (~20ms)
+    // to confirm finger lift + 60ms inter-tap guard to prevent bounce double-taps:
+    // - Single Tap (240ms window) -> handleScreenSingleTap() (Snappy Tally Send)
+    // - Double Tap (60..240ms)    -> handleScreenDoubleTap() (Screen 0 <-> Diag)
     // - Long Press (>1.2s)        -> handleScreenLongPress() (Cycle Brightness)
   }
 }`}
@@ -173,7 +173,7 @@ export function UserManual() {
           <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-6 space-y-4">
             <h2 className="text-xl font-bold text-white flex items-center gap-2">
               <Layers className="w-5 h-5 text-sky-400" />
-              Overview of the 13 Operating Modes
+              Overview of the 14 Operating Modes
             </h2>
             <p className="text-slate-300 text-sm">
               The Olimex ESP32-PoE2 + Waveshare 1.69&quot; Touch LCD firmware contains a universal protocol stack that allows the unit to transform into any of the following roles simply by selecting it in the web interface:
@@ -258,6 +258,12 @@ export function UserManual() {
                   badge: 'iOS Port 53000',
                   color: 'bg-rose-500/20 text-rose-400 border-rose-500/40',
                   desc: 'Compatible with RSMCK OSC Cue Light iOS app. Matches station ID, handles /standby_ack, returns ACK to iPad, and shows top banner.'
+                },
+                {
+                  mode: 'vMix Live Production Tally',
+                  badge: 'TCP API 8099',
+                  color: 'bg-sky-500/20 text-sky-400 border-sky-500/40',
+                  desc: 'Connects directly to vMix TCP API on Core 0 (SUBSCRIBE TALLY). Shows Red for Program (1), Green for Preview (2), and optional PreviewInput / ActiveInput tap triggers.'
                 }
               ].map((item, idx) => (
                 <div key={idx} className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-2">
@@ -393,6 +399,16 @@ export function UserManual() {
                 </div>
               </div>
             </div>
+            <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-2">
+              <h3 className="font-semibold text-white text-sm">Separate rtpMIDI Mode Receiver vs. MTC Receiver (/rtpmidi)</h3>
+              <p className="text-slate-300 text-xs">
+                Use the dedicated <code>/rtpmidi</code> portal to browse <code>_apple-midi._udp</code> hosts via mDNS and configure two independent AppleMIDI sessions on the same device:
+              </p>
+              <ul className="list-disc list-inside text-xs text-slate-300 space-y-1">
+                <li><strong>Mode Receiver (Default UDP 5004/5005):</strong> Dedicated to <code>RTP_MIDI</code> and <code>MSC_RTP_MIDI</code> tally/cue triggers and MIDI button feedback.</li>
+                <li><strong>Separate MTC Receiver (Default UDP 5006/5007):</strong> Active globally across all 13 operating modes so SMPTE timecode can originate from a separate DAW or QLab machine.</li>
+              </ul>
+            </div>
           </div>
         </div>
       )}
@@ -452,7 +468,7 @@ export function UserManual() {
               <h2 className="text-xl font-bold text-white">MTC (MIDI Time Code) Reader</h2>
             </div>
             <p className="text-slate-300 text-sm">
-              When the global <strong>MTC Reader</strong> option is enabled in Web configuration, the top header on Screen 0 transforms from an NTP clock into an ultra-precise, real-time SMPTE timecode readout.
+              When the global <strong>MTC Reader</strong> option is enabled in Web configuration, the top header on Screen 0 transforms from an NTP clock into an ultra-precise, real-time SMPTE timecode readout. Its dedicated AppleMIDI receiver runs on its own UDP port (default <code>5006</code>/<code>5007</code>) and registers a separate <code>_apple-midi._udp</code> mDNS session independent of the Tally/MSC mode receiver.
             </p>
 
             <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-3">
@@ -617,9 +633,9 @@ Content-Type: application/json
             </div>
 
             <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-2 text-xs text-slate-300">
-              <h4 className="font-semibold text-white">PoE vs Wi-Fi Precedence (No Dual-IP Collisions):</h4>
+              <h4 className="font-semibold text-white">PoE vs Wi-Fi Precedence &amp; On-Demand AP Scan (/wifi):</h4>
               <p>
-                When an active 802.3af PoE Ethernet cable is plugged into the Olimex ESP32-PoE2 RJ45 MagJack, the ESP32 automatically disconnects Wi-Fi and powers down the Wi-Fi radio (<code>WIFI_OFF</code>) via <code>MycilaESPConnect</code>. This prevents IP conflicts, duplicate mDNS announcements, and routing loops. If Ethernet is unplugged, Wi-Fi automatically re-engages and the battery keeps the unit online seamlessly.
+                When an active 802.3af PoE Ethernet cable is plugged into the Olimex ESP32-PoE2 RJ45 MagJack, the ESP32 automatically disconnects Wi-Fi and powers down the Wi-Fi radio (<code>WIFI_OFF</code>) via <code>MycilaESPConnect</code> unless &ldquo;Keep Wi-Fi Connected alongside PoE&rdquo; is selected on <code>/wifi</code>. Opening the dedicated <code>/wifi</code> configuration page lets you trigger an AP scan even when Wi-Fi is powered off—the firmware temporarily wakes STA mode for <code>WiFi.scanNetworks()</code>, displays SSIDs/RSSI, and cleanly returns the radio to its low-power PoE state afterward.
               </p>
             </div>
           </div>

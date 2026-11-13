@@ -55,6 +55,9 @@ export default function App() {
     staticGW: '192.168.1.1',
     staticDNS: '8.8.8.8',
     wifiDisabledForEth: false,
+    wifiSsid: 'Studio-Production-WiFi',
+    wifiPass: '',
+    wifiKeepOnWithPoE: false,
     // Olimex ESP32-PoE2 Battery & Power System
     batteryVoltage: 4.10,
     batteryPercent: 92,
@@ -68,9 +71,14 @@ export default function App() {
     // Timezone & Clock (Item 1)
     timezone: 'Europe/London',
     customTZPosix: 'GMT0BST,M3.5.0/1,M10.5.0',
-    // MTC Reader (Item 4)
+    // Separate MTC Reader (Independent Port 5006 / mDNS Instance)
     mtcReaderEnabled: false,
     mtcTimecode: '01:00:00:00',
+    mtcPort: 5006,
+    mtcSessionName: 'Olimex-MTC-A4B2',
+    mtcMdnsEnabled: true,
+    mtcPeerHost: '',
+    mtcPeerPort: 5004,
     // AtomENV Sensor (Item 9)
     envSensorEnabled: true,
     envTemperature: 22.4,
@@ -115,6 +123,13 @@ export default function App() {
     oscCueMessage: '',
     oscCueState: 'off',
     oscCueAckDone: false,
+    // vMix Live Production Tally (TCP API Port 8099)
+    vmixHost: '192.168.1.100',
+    vmixPort: 8099,
+    vmixInput: 1,
+    vmixLabel: 'CAM 1',
+    vmixBtnAction: 0,
+    vmixTallyState: 0,
     cueHost: '192.168.1.50',
     cuePort: 4000,
     cueChannel: 1,
@@ -131,6 +146,10 @@ export default function App() {
     nmosPreview: false,
     nmosAux: false,
     rtpMidiPort: 5004,
+    rtpMidiSessionName: 'Olimex-Tally-A4B2',
+    rtpMidiMdnsEnabled: true,
+    rtpMidiPeerHost: '',
+    rtpMidiPeerPort: 5004,
     rtpMidiChannel: 1,
     rtpMidiTriggerType: 0,
     rtpMidiNumRed: 60,
@@ -278,6 +297,21 @@ export default function App() {
         decoded: `MSC / rtpMIDI Button Return: Dev:${simState.mscDeviceId} Ch:${simState.midiBtnChannel} Num:${simState.midiBtnNumber} PressVal:${simState.midiBtnPress}`,
         timestamp: timeStr,
         channel: 1,
+        live
+      });
+      return;
+    }
+
+    if (simState.operatingMode === 'vMix') {
+      const cmd = simState.vmixBtnAction === 2
+        ? `FUNCTION ActiveInput Input=${simState.vmixInput}\r\n`
+        : `FUNCTION PreviewInput Input=${simState.vmixInput}\r\n`;
+      const hex = Array.from(cmd.trim()).slice(0, 18).map(c => c.charCodeAt(0).toString(16).padStart(2, '0').toUpperCase()).join(' ');
+      setLastTslPacket({
+        hex,
+        decoded: `vMix TCP API (${simState.vmixHost}:${simState.vmixPort}): ${cmd.trim()}`,
+        timestamp: timeStr,
+        channel: simState.vmixInput,
         live
       });
       return;
@@ -521,7 +555,7 @@ export default function App() {
             <BookOpen className="w-3.5 h-3.5 text-sky-400" />
             <span>User Manual &amp; Docs</span>
             <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-sky-950 text-sky-300 border border-sky-800">
-              13 Modes
+              14 Modes
             </span>
           </button>
         </div>

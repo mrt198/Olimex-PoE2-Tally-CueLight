@@ -14,7 +14,7 @@
  *   - Long Press (>1.2s)   : Cycles display backlight brightness (25%, 50%, 75%, 100%)
  *   - Hold (>7.0s)         : Emergency network/config reset & reboot
  *
- * Supported Operating Modes (13):
+ * Supported Operating Modes (14):
  *   1. TP                 - Technical Producer with Tally Arbiter (button sends TSL 3.1 Program 0x32)
  *   2. Presenter          - Presenter with Tally Arbiter (button sends TSL 3.1 Preview 0x31)
  *   3. TP_P2P             - Standalone TP Master (no Tally Arbiter, 250ms heartbeat + fault alarm)
@@ -28,6 +28,7 @@
  *  11. TSL_31             - TSL UMD v3.1 Dedicated Listener (UDP or TCP, centered source name)
  *  12. TSL_50             - TSL UMD v5.0 Dedicated Listener (UDP or TCP, 4 tally bits + UTF-8 name)
  *  13. OSC_CueLight       - OSC Cue Light for iOS (RSMCK protocol, UDP 53000, persistent banner + ACK)
+ *  14. vMix               - vMix Live Production Switcher Tally (TCP API Port 8099, SUBSCRIBE TALLY + Preview/Active Input)
  *
  * Global Features:
  *   - Live LiPo Battery Charge Level (%), Voltage (V), and PoE/Charging Status Readout
@@ -158,10 +159,12 @@ typedef AsyncWebServerRequest* AsyncWebServerRequestPtr;
 #include <Preferences.h>
 #include <WiFiUdp.h>
 #include <ESPmDNS.h>
+#include <mdns.h>
 #include <ArduinoOTA.h>
 #include <time.h>
 #include <esp_bt.h>
 #include <esp_wifi.h>
+#include <esp_timer.h>
 
 // ==========================================
 // LovyanGFX Display Driver (Waveshare 1.69" ST7789V2)
@@ -344,22 +347,33 @@ bool   nmos_preview_active  = false;
 bool   nmos_aux_active      = false;
 bool   nmos_is_on_air       = false;
 
-// rtpMIDI / AppleMIDI Configuration & State
-int    rtpmidi_port         = 5004;
-int    rtpmidi_channel      = 1;
-int    rtpmidi_trigger_type = 0; // 0=Note, 1=CC, 2=PC
-int    rtpmidi_num_red       = 60;
-int    rtpmidi_num_flash_red = 61;
-int    rtpmidi_num_green     = 62;
-int    rtpmidi_num_yellow    = 63;
-int    rtpmidi_num_blue      = 64;
-int    rtpmidi_num_white     = 65;
-bool   midi_active_red       = false;
-bool   midi_active_flash_red = false;
-bool   midi_active_green     = false;
-bool   midi_active_yellow    = false;
-bool   midi_active_blue      = false;
-bool   midi_active_white     = false;
+// rtpMIDI / AppleMIDI Tally & MSC Mode Receiver (Control Port N, Data Port N+1)
+int       rtpmidi_port              = 5004;
+int       rtpmidi_channel           = 1;
+int       rtpmidi_trigger_type      = 0; // 0=Note, 1=CC, 2=PC
+int       rtpmidi_num_red           = 60;
+int       rtpmidi_num_flash_red     = 61;
+int       rtpmidi_num_green         = 62;
+int       rtpmidi_num_yellow        = 63;
+int       rtpmidi_num_blue          = 64;
+int       rtpmidi_num_white         = 65;
+bool      midi_active_red           = false;
+bool      midi_active_flash_red     = false;
+bool      midi_active_green         = false;
+bool      midi_active_yellow        = false;
+bool      midi_active_blue          = false;
+bool      midi_active_white         = false;
+String    rtpmidi_session_name      = "";
+bool      rtpmidi_mdns_enabled      = true;
+String    rtpmidi_peer_host         = "";
+int       rtpmidi_peer_port         = 5004;
+bool      rtpmidi_session_connected = false;
+String    rtpmidi_last_sender       = "";
+IPAddress rtpmidi_peer_ip           = IPAddress(0, 0, 0, 0);
+uint16_t  rtpmidi_peer_data_port    = 5005;
+WiFiUDP   rtpMidiCtrlUdp;
+WiFiUDP   rtpMidiDataUdp;
+uint16_t  activeRtpMidiBoundPort    = 0;
 
 // OSC (Open Sound Control) Configuration & State
 int    osc_port             = 8000;
@@ -395,6 +409,19 @@ bool   osccue_ack_done      = false;
 IPAddress osccue_last_sender_ip = IPAddress(255, 255, 255, 255);
 uint16_t osccue_last_sender_port = 53000;
 
+// vMix Live Production Switcher Tally (TCP API Port 8099)
+String vmix_host                    = "192.168.1.100";
+int    vmix_port                    = 8099;
+int    vmix_input                   = 1;   // 1-based vMix Input number
+String vmix_label                   = "";  // Optional custom display label
+int    vmix_btn_action              = 0;   // 0=Toggle Diag Screen, 1=PreviewInput, 2=ActiveInput
+int    vmix_tally_val               = 0;   // 0=Off, 1=Program (Red), 2=Preview (Green)
+WiFiClient vmixClient;
+String vmixRxBuffer                 = "";
+volatile bool vmixConnected               = false;
+volatile bool vmixReconnectRequested      = false;
+volatile bool vmixButtonActionRequested   = false;
+
 // Promptside Theatrical Cue Light Outstation (promptside.co)
 int    promptside_port          = 8000;
 String promptside_channel       = "1";
@@ -414,12 +441,24 @@ String msc_current_cue          = "";
 String msc_last_command         = "STOP";
 String msc_state                = "off";
 
-// MTC (MIDI Time Code) Reader
-bool   mtc_reader_enabled     = false;
-String mtc_timecode_str       = "--:--:--:--";
-uint8_t mtc_fps_type          = 1;
-unsigned long lastMTCTime     = 0;
-uint8_t mtc_qframe_pieces[8]  = {0};
+// Dedicated MTC (MIDI Time Code) rtpMIDI Receiver (Separate Device & Socket from Mode rtpMIDI)
+bool      mtc_reader_enabled        = false;
+int       mtc_rtpmidi_port          = 5006; // Separate default control port (Data=5007)
+String    mtc_session_name          = "";   // Defaults to "Olimex-MTC-<MAC>"
+bool      mtc_mdns_enabled          = true;
+String    mtc_peer_host             = "";
+int       mtc_peer_port             = 5004;
+bool      mtc_session_connected     = false;
+String    mtc_last_sender           = "";
+IPAddress mtc_peer_ip               = IPAddress(0, 0, 0, 0);
+uint16_t  mtc_peer_data_port        = 5005;
+WiFiUDP   mtcCtrlUdp;
+WiFiUDP   mtcDataUdp;
+uint16_t  activeMtcBoundPort        = 0;
+String    mtc_timecode_str          = "--:--:--:--";
+uint8_t   mtc_fps_type              = 1;
+unsigned long lastMTCTime           = 0;
+uint8_t   mtc_qframe_pieces[8]      = {0};
 
 // MIDI Mode Button Return Action
 int    midi_btn_type          = 1; // 0=None, 1=Note Mom, 2=Note Tog, 3=CC Mom, 4=CC Tog, 5=PC
@@ -444,8 +483,14 @@ float  env_humidity           = 0.0f;
 float  env_pressure           = 0.0f;
 unsigned long lastEnvReadTime = 0;
 
-// Wi-Fi Precedence State
-bool   wifiDisabledForEth     = false;
+// Wi-Fi Configuration & Precedence State
+bool          wifiDisabledForEth      = false;
+String        wifi_ssid               = "";
+String        wifi_pass               = "";
+bool          wifi_keep_on_with_poe   = false;
+volatile bool wifiScanInProgress      = false;
+bool          wifiWasOffBeforeScan    = false;
+unsigned long wifiScanStartedAt       = 0;
 
 // TCP Server instance for TSL 3.1 & TSL 5.0 TCP modes
 AsyncServer* tslTcpServer     = nullptr;
@@ -494,9 +539,13 @@ AsyncWebServer server(80);
 Mycila::ESPConnect espConnect(server);
 
 // Multi-Core & Thread-Safety Variables (FreeRTOS)
-volatile bool tallyStateChanged = false;
-volatile bool flashRequested = false;
-TaskHandle_t socketTaskHandle = NULL;
+volatile bool tallyStateChanged     = false;
+volatile bool flashRequested        = false;
+volatile bool taConnectRequested    = false;
+volatile bool taDisconnectRequested = false;
+volatile bool taSocketConnected     = false;
+SemaphoreHandle_t taStateMutex      = NULL;
+TaskHandle_t socketTaskHandle       = NULL;
 
 // Forward Declarations
 void initBatteryADC();
@@ -510,6 +559,8 @@ void initDoubleBuffer();
 void applyPowerManagementConfig();
 void wakeDisplayFromDim();
 void socketTask(void *pvParameters);
+void handleVmixSocketLoop();
+const char* getActiveRoleTag();
 void sendtally(int channel, bool live);
 void sendCueAck();
 void sendNMOSTally(bool live);
@@ -520,6 +571,14 @@ void sendMidiButtonAction(bool pressed);
 void readEnvSensor();
 void processIncomingTSL();
 void processRTPMidiPacket(uint8_t* buf, int len, IPAddress remoteIP, uint16_t remotePort);
+void processTallyMidiReceivers();
+void processMtcMidiReceivers();
+void startMidiReceivers();
+void registerAppleMidiMDNS();
+void sendAppleMidiInvite(WiFiUDP& sock, IPAddress targetIP, uint16_t port, uint32_t ssrc, const String& sessName);
+void connectConfiguredMidiPeers();
+void applyWifiConfig();
+void finishTemporaryWifiScanIfNeeded();
 void processOSCPacket(uint8_t* buf, int len);
 void processTSL31Packet(uint8_t* buf, int len);
 void processTSL50Packet(uint8_t* buf, int len);
@@ -542,7 +601,7 @@ void renderClockTick();
 void updateBrightness();
 void connectToServer();
 void disconnectFromServer();
-void applyNetworkIPConfig();
+void applyNetworkIPConfig(bool force = false);
 void socket_event(socketIOmessageType_t type, uint8_t *payload, size_t length);
 void socket_Connected(const char *payload, size_t length);
 void socket_Flash();
@@ -572,17 +631,34 @@ bool isTSL50Listener()   { return operatingMode == "TSL_50"; }
 bool isOSCCueLight()     { return operatingMode == "OSC_CueLight"; }
 bool isPromptside()      { return operatingMode == "Promptside"; }
 bool isMSCRTPMidi()      { return operatingMode == "MSC_RTP_MIDI"; }
+bool isVmix()            { return operatingMode == "vMix"; }
 bool usesTallyArbiter()  { return operatingMode == "TP" || operatingMode == "Presenter"; }
+
+const char* getActiveRoleTag() {
+  if (isPresenter())     return "presenter";
+  if (isTP())            return "tp";
+  if (isETCCueSystem())  return "cue";
+  if (isNMOSIS07())      return "nmos";
+  if (isRTPMidi())       return "rtpmidi";
+  if (isMSCRTPMidi())    return "msc";
+  if (isPromptside())    return "promptside";
+  if (isOSC())           return "osc";
+  if (isTSL31Listener()) return "tsl31";
+  if (isTSL50Listener()) return "tsl50";
+  if (isOSCCueLight())   return "osccue";
+  if (isVmix())          return "vmix";
+  return "tally";
+}
 
 uint16_t getActiveListenPort() {
   if (isETCCueSystem())  return (uint16_t)cuesystem_port;
-  if (isRTPMidi())       return (uint16_t)rtpmidi_port;
-  if (isMSCRTPMidi())    return (uint16_t)msc_rtpmidi_port;
+  if (isRTPMidi() || isMSCRTPMidi()) return (uint16_t)atoi(tallyarbiter_TSLport); // rtpMIDI/MSC own rtpMidiCtrlUdp/rtpMidiDataUdp
   if (isPromptside())    return (uint16_t)promptside_port;
   if (isOSC())           return (uint16_t)osc_port;
   if (isTSL31Listener()) return (uint16_t)tsl31_port;
   if (isTSL50Listener()) return (uint16_t)tsl50_port;
   if (isOSCCueLight())   return (uint16_t)osccue_port;
+  if (isVmix())          return (uint16_t)vmix_port;
   return (uint16_t)atoi(tallyarbiter_TSLport);
 }
 
@@ -646,11 +722,11 @@ void readBatteryState() {
 // ==========================================
 // CST816T Capacitive Touch Driver (I2C GPIO 33/32)
 // ==========================================
-#define TOUCH_POLL_INTERVAL_MS      20
-#define TOUCH_RELEASE_CONFIRM_POLLS 2    // Require 2 consecutive points==0 reads (~40ms) to ignore lift chatter
-#define TOUCH_MIN_INTERTAP_GAP_MS   95   // Minimum ms after release before Tap 2 can start (blocks bounce)
-#define TOUCH_DOUBLE_TAP_WINDOW_MS  420  // Max ms from Tap 1 release to Tap 2 press
-#define TOUCH_COOLDOWN_MS           320  // Lockout after Double-Tap or Long-Press completes
+#define TOUCH_POLL_INTERVAL_MS      10   // Fast 100 Hz polling when touch INT is active
+#define TOUCH_RELEASE_CONFIRM_POLLS 2    // Require 2 consecutive points==0 reads (~20ms) to ignore lift chatter
+#define TOUCH_MIN_INTERTAP_GAP_MS   60   // Minimum ms after release before Tap 2 can start (blocks bounce)
+#define TOUCH_DOUBLE_TAP_WINDOW_MS  240  // Max ms from Tap 1 release to Tap 2 press (snappy single-tap response)
+#define TOUCH_COOLDOWN_MS           200  // Short lockout after Double-Tap or Long-Press completes
 
 void initCST816TTouch() {
   Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL, 400000);
@@ -719,7 +795,7 @@ void processTouchEvents() {
             if (now < touch.cooldownUntil) {
               return;
             }
-            // Reject capacitive lift-off bounce (< 95ms after release) so a single tap never double-triggers
+            // Reject capacitive lift-off bounce (< 60ms after release) so a single tap never double-triggers
             if (touch.lastReleaseTime > 0 && (now - touch.lastReleaseTime) < TOUCH_MIN_INTERTAP_GAP_MS) {
               return;
             }
@@ -860,6 +936,15 @@ void handleScreenSingleTap() {
     logger("[Touch] Single Tap -> TSL Listener diagnostics toggle", "info");
     currentScreen = (currentScreen == 0) ? 1 : 0;
     renderScreen();
+  } else if (isVmix()) {
+    if (vmix_btn_action == 0) {
+      currentScreen = (currentScreen == 0) ? 1 : 0;
+      logger("[Touch] Single Tap -> vMix Diagnostics Screen toggle", "info");
+      renderScreen();
+    } else {
+      logger(String("[Touch] Single Tap -> vMix trigger queued for Input ") + String(vmix_input), "info");
+      vmixButtonActionRequested = true;
+    }
   } else {
     logger(String("[Touch] Single Tap -> Toggle Cue CH1 (") + (isPresenter() ? "Presenter Preview" : "TP Program") + ")", "info");
     ch1state = !ch1state;
@@ -926,23 +1011,41 @@ void initDoubleBuffer() {
 // ==========================================
 // Network Helper Utilities & IP Configuration
 // ==========================================
-void applyNetworkIPConfig() {
+static bool   currentConfiguredDHCP = true;
+static String currentConfiguredIP   = "";
+static String currentConfiguredMask = "";
+static String currentConfiguredGW   = "";
+static String currentConfiguredDNS  = "";
+
+bool isEthernetActive() {
+  return ETH.linkUp() && ETH.localIP() != IPAddress(0, 0, 0, 0);
+}
+
+void applyNetworkIPConfig(bool force) {
   if (!useDHCP && static_ip.length() > 0 && static_mask.length() > 0 && static_gw.length() > 0) {
+    if (!force && !currentConfiguredDHCP && static_ip == currentConfiguredIP && static_mask == currentConfiguredMask && static_gw == currentConfiguredGW && static_dns == currentConfiguredDNS) {
+      return;
+    }
     IPAddress ip, mask, gw, dns;
     if (ip.fromString(static_ip) && mask.fromString(static_mask) && gw.fromString(static_gw)) {
       if (!dns.fromString(static_dns)) dns = gw;
       logger(String("[Network] Static IP: ") + static_ip + " Mask: " + static_mask + " GW: " + static_gw, "info");
       ETH.config(ip, gw, mask, dns);
       WiFi.config(ip, gw, mask, dns);
+      currentConfiguredDHCP = false;
+      currentConfiguredIP   = static_ip;
+      currentConfiguredMask = static_mask;
+      currentConfiguredGW   = static_gw;
+      currentConfiguredDNS  = static_dns;
       return;
     }
   }
+  if (!force && currentConfiguredDHCP && isEthernetActive()) {
+    return;
+  }
   logger("[Network] DHCP IP assignment configured", "info");
   ETH.config(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
-}
-
-bool isEthernetActive() {
-  return ETH.linkUp() && ETH.localIP() != IPAddress(0, 0, 0, 0);
+  currentConfiguredDHCP = true;
 }
 
 void applyTimezoneConfig() {
@@ -973,52 +1076,85 @@ void applyTimezoneConfig() {
   logger(String("[Time] Timezone applied: ") + timezone_name + " (" + posix_time_zone_info + ")", "info");
 }
 
-// Send User-Configured MIDI Message on Touch Button Action
+// Send User-Configured MIDI Message on Touch Button Action (RFC 6295 RTP-MIDI + Raw fallback)
 void sendMidiButtonAction(bool pressed) {
   if (!networkConnected || midi_btn_type == 0) return;
 
   uint8_t ch = (midi_btn_channel >= 1 && midi_btn_channel <= 16) ? (midi_btn_channel - 1) : 0;
-  uint8_t packet[8];
-  int pLen = 0;
+  uint8_t midiBytes[4];
+  int mLen = 0;
 
   if (midi_btn_type == 1) {
-    packet[0] = pressed ? (0x90 | ch) : (0x80 | ch);
-    packet[1] = midi_btn_number & 0x7F;
-    packet[2] = pressed ? (midi_btn_val_press & 0x7F) : (midi_btn_val_release & 0x7F);
-    pLen = 3;
+    midiBytes[0] = pressed ? (0x90 | ch) : (0x80 | ch);
+    midiBytes[1] = midi_btn_number & 0x7F;
+    midiBytes[2] = pressed ? (midi_btn_val_press & 0x7F) : (midi_btn_val_release & 0x7F);
+    mLen = 3;
   } else if (midi_btn_type == 2 && pressed) {
     midi_btn_toggle_state = !midi_btn_toggle_state;
-    packet[0] = midi_btn_toggle_state ? (0x90 | ch) : (0x80 | ch);
-    packet[1] = midi_btn_number & 0x7F;
-    packet[2] = midi_btn_toggle_state ? (midi_btn_val_press & 0x7F) : (midi_btn_val_release & 0x7F);
-    pLen = 3;
+    midiBytes[0] = midi_btn_toggle_state ? (0x90 | ch) : (0x80 | ch);
+    midiBytes[1] = midi_btn_number & 0x7F;
+    midiBytes[2] = midi_btn_toggle_state ? (midi_btn_val_press & 0x7F) : (midi_btn_val_release & 0x7F);
+    mLen = 3;
   } else if (midi_btn_type == 3) {
-    packet[0] = 0xB0 | ch;
-    packet[1] = midi_btn_number & 0x7F;
-    packet[2] = pressed ? (midi_btn_val_press & 0x7F) : (midi_btn_val_release & 0x7F);
-    pLen = 3;
+    midiBytes[0] = 0xB0 | ch;
+    midiBytes[1] = midi_btn_number & 0x7F;
+    midiBytes[2] = pressed ? (midi_btn_val_press & 0x7F) : (midi_btn_val_release & 0x7F);
+    mLen = 3;
   } else if (midi_btn_type == 4 && pressed) {
     midi_btn_toggle_state = !midi_btn_toggle_state;
-    packet[0] = 0xB0 | ch;
-    packet[1] = midi_btn_number & 0x7F;
-    packet[2] = midi_btn_toggle_state ? (midi_btn_val_press & 0x7F) : (midi_btn_val_release & 0x7F);
-    pLen = 3;
+    midiBytes[0] = 0xB0 | ch;
+    midiBytes[1] = midi_btn_number & 0x7F;
+    midiBytes[2] = midi_btn_toggle_state ? (midi_btn_val_press & 0x7F) : (midi_btn_val_release & 0x7F);
+    mLen = 3;
   } else if (midi_btn_type == 5 && pressed) {
-    packet[0] = 0xC0 | ch;
-    packet[1] = midi_btn_number & 0x7F;
-    pLen = 2;
+    midiBytes[0] = 0xC0 | ch;
+    midiBytes[1] = midi_btn_number & 0x7F;
+    mLen = 2;
   }
 
-  if (pLen > 0) {
+  if (mLen > 0) {
+    static uint16_t rtpMidiSeq = 1;
+    uint8_t rtpPacket[24];
+    rtpPacket[0] = 0x80; // V=2
+    rtpPacket[1] = 0x61; // PT=97 (RTP-MIDI)
+    rtpPacket[2] = (rtpMidiSeq >> 8) & 0xFF;
+    rtpPacket[3] = rtpMidiSeq & 0xFF;
+    rtpMidiSeq++;
+    uint32_t ts = (uint32_t)(esp_timer_get_time() / 100ULL);
+    rtpPacket[4] = (ts >> 24) & 0xFF;
+    rtpPacket[5] = (ts >> 16) & 0xFF;
+    rtpPacket[6] = (ts >> 8) & 0xFF;
+    rtpPacket[7] = ts & 0xFF;
+    uint32_t ssrc = 0x4F4C4D58; // "OLMX"
+    rtpPacket[8]  = (ssrc >> 24) & 0xFF;
+    rtpPacket[9]  = (ssrc >> 16) & 0xFF;
+    rtpPacket[10] = (ssrc >> 8) & 0xFF;
+    rtpPacket[11] = ssrc & 0xFF;
+    rtpPacket[12] = (uint8_t)(mLen & 0x0F); // Short command header (no initial delta)
+    memcpy(rtpPacket + 13, midiBytes, mLen);
+    int totalLen = 13 + mLen;
+
     IPAddress targetIP(255, 255, 255, 255);
-    if (pairedTargetIP.length() > 0 && pairedTargetIP != "0.0.0.0") {
+    uint16_t destPort = (uint16_t)(isMSCRTPMidi() ? msc_rtpmidi_port : rtpmidi_port) + 1;
+    if (rtpmidi_session_connected && rtpmidi_peer_ip != IPAddress(0, 0, 0, 0)) {
+      targetIP = rtpmidi_peer_ip;
+      destPort = rtpmidi_peer_data_port;
+    } else if (rtpmidi_peer_host.length() > 0 && targetIP.fromString(rtpmidi_peer_host)) {
+      destPort = (uint16_t)(rtpmidi_peer_port + 1);
+    } else if (pairedTargetIP.length() > 0 && pairedTargetIP != "0.0.0.0") {
       targetIP.fromString(pairedTargetIP);
     }
-    uint16_t destPort = isMSCRTPMidi() ? (uint16_t)msc_rtpmidi_port : (uint16_t)rtpmidi_port;
-    udp.beginPacket(targetIP, destPort);
-    udp.write(packet, pLen);
-    udp.endPacket();
-    logger(String("[rtpMIDI] Sent Button Action: Type=") + String(midi_btn_type) + " Num=" + String(midi_btn_number), "info");
+
+    if (activeRtpMidiBoundPort > 0) {
+      rtpMidiDataUdp.beginPacket(targetIP, destPort);
+      rtpMidiDataUdp.write(rtpPacket, totalLen);
+      rtpMidiDataUdp.endPacket();
+    } else {
+      udp.beginPacket(targetIP, destPort);
+      udp.write(rtpPacket, totalLen);
+      udp.endPacket();
+    }
+    logger(String("[rtpMIDI] Sent Button Action: Type=") + String(midi_btn_type) + " Num=" + String(midi_btn_number) + " -> " + targetIP.toString() + ":" + String(destPort), "info");
   }
 }
 
@@ -1134,20 +1270,65 @@ String getNetworkIPStr() {
   return "0.0.0.0";
 }
 
-// Disable Wi-Fi & Bluetooth when PoE Ethernet is active
-void checkEthernetWifiPrecedence() {
-  if (isEthernetActive()) {
-    battery.isPoE = true;
-    if (!wifiDisabledForEth) {
-      wifiDisabledForEth = true;
-      logger("[Network] PoE Ethernet active (" + ETH.localIP().toString() + "). Disabling Wi-Fi & Bluetooth.", "info");
-      WiFi.disconnect(true);
+void finishTemporaryWifiScanIfNeeded() {
+  if (!wifiScanInProgress) return;
+  if (millis() - wifiScanStartedAt > 15000UL) {
+    WiFi.scanDelete();
+    if (wifiWasOffBeforeScan && isEthernetActive() && !wifi_keep_on_with_poe) {
+      WiFi.disconnect(false);
       WiFi.mode(WIFI_OFF);
       esp_wifi_stop();
-      if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
-        btStop();
-        esp_bt_controller_disable();
+      wifiDisabledForEth = true;
+    }
+    wifiWasOffBeforeScan = false;
+    wifiScanInProgress = false;
+  }
+}
+
+void applyWifiConfig() {
+  if (!isEthernetActive() || wifi_keep_on_with_poe) {
+    if (wifi_ssid.length() > 0) {
+      wifiDisabledForEth = false;
+      esp_wifi_start();
+      WiFi.mode(WIFI_STA);
+      WiFi.persistent(true);
+      WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
+      logger(String("[WiFi] Connecting to saved SSID: ") + wifi_ssid, "info");
+    }
+  } else if (isEthernetActive() && !wifi_keep_on_with_poe && !wifiScanInProgress) {
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_OFF);
+    esp_wifi_stop();
+    wifiDisabledForEth = true;
+    logger("[WiFi] PoE Ethernet active; saved Wi-Fi stored for failover (RF OFF).", "info");
+  }
+}
+
+// Manage Wi-Fi / Bluetooth power vs PoE Ethernet precedence (safe during temporary AP scans)
+void checkEthernetWifiPrecedence() {
+  if (wifiScanInProgress) {
+    finishTemporaryWifiScanIfNeeded();
+    return;
+  }
+  if (isEthernetActive()) {
+    battery.isPoE = true;
+    if (!wifi_keep_on_with_poe) {
+      if (!wifiDisabledForEth) {
+        wifiDisabledForEth = true;
+        logger("[Network] PoE Ethernet active (" + ETH.localIP().toString() + "). Disabling Wi-Fi & Bluetooth.", "info");
+        WiFi.disconnect(false);
+        WiFi.mode(WIFI_OFF);
+        esp_wifi_stop();
+        if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+          btStop();
+          esp_bt_controller_disable();
+        }
       }
+    } else if (wifiDisabledForEth && wifi_ssid.length() > 0) {
+      wifiDisabledForEth = false;
+      esp_wifi_start();
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
     }
   } else {
     battery.isPoE = false;
@@ -1156,7 +1337,11 @@ void checkEthernetWifiPrecedence() {
       logger("[Network] PoE Ethernet disconnected. Re-enabling Wi-Fi fallback.", "info");
       esp_wifi_start();
       WiFi.mode(WIFI_STA);
-      espConnect.begin(listenerDeviceName.c_str(), listenerDeviceName.c_str());
+      if (wifi_ssid.length() > 0) {
+        WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
+      } else {
+        espConnect.begin(listenerDeviceName.c_str(), listenerDeviceName.c_str());
+      }
     }
   }
 }
@@ -1453,33 +1638,248 @@ void processIncomingTSL() {
 }
 
 // ==========================================
-// rtpMIDI / AppleMIDI & MTC Timecode Parser
+// AppleMIDI (RFC 6295), Separate rtpMIDI Mode & Separate MTC Receivers + mDNS
 // ==========================================
-void processRTPMidiPacket(uint8_t* buf, int len, IPAddress remoteIP, uint16_t remotePort) {
-  if (len >= 4 && buf[0] == 0xFF && buf[1] == 0xFF) {
-    if (buf[2] == 'I' && buf[3] == 'N') {
-      uint8_t okResp[16];
-      okResp[0] = 0xFF; okResp[1] = 0xFF;
-      okResp[2] = 'O'; okResp[3] = 'K';
-      memcpy(okResp + 4, buf + 4, 8);
-      uint32_t localSSRC = 0x4F4C4D58; // "OLMX" SSRC
-      memcpy(okResp + 12, &localSSRC, 4);
-      udp.beginPacket(remoteIP, remotePort);
-      udp.write(okResp, 16);
-      udp.endPacket();
-      logger(String("[rtpMIDI] AppleMIDI session accepted from ") + remoteIP.toString(), "info");
-      return;
-    } else if (buf[2] == 'C' && buf[3] == 'K') {
-      udp.beginPacket(remoteIP, remotePort);
-      udp.write(buf, len);
-      udp.endPacket();
-      return;
+void sendAppleMidiInvite(WiFiUDP& sock, IPAddress targetIP, uint16_t port, uint32_t ssrc, const String& sessName) {
+  if (!networkConnected) return;
+  uint8_t pkt[80];
+  pkt[0] = 0xFF; pkt[1] = 0xFF;
+  pkt[2] = 'I';  pkt[3] = 'N';
+  pkt[4] = 0x00; pkt[5] = 0x00; pkt[6] = 0x00; pkt[7] = 0x02; // Protocol Version 2
+  uint32_t tok = esp_random();
+  pkt[8]  = (tok >> 24) & 0xFF;
+  pkt[9]  = (tok >> 16) & 0xFF;
+  pkt[10] = (tok >> 8)  & 0xFF;
+  pkt[11] = tok & 0xFF;
+  pkt[12] = (ssrc >> 24) & 0xFF;
+  pkt[13] = (ssrc >> 16) & 0xFF;
+  pkt[14] = (ssrc >> 8)  & 0xFF;
+  pkt[15] = ssrc & 0xFF;
+  String safeName = sessName.length() > 0 ? sessName.substring(0, 48) : listenerDeviceName;
+  memcpy(pkt + 16, safeName.c_str(), safeName.length());
+  pkt[16 + safeName.length()] = '\0';
+  int totalLen = 16 + safeName.length() + 1;
+
+  sock.beginPacket(targetIP, port);
+  sock.write(pkt, totalLen);
+  sock.endPacket();
+  logger(String("[AppleMIDI] Sent IN invitation ('") + safeName + "') -> " + targetIP.toString() + ":" + String(port), "info");
+}
+
+void registerAppleMidiMDNS() {
+  // Remove previous _apple-midi._udp registrations cleanly so mode/port edits never leave stale records
+  while (mdns_service_remove("_apple-midi", "_udp") == ESP_OK) {}
+
+  if (rtpmidi_mdns_enabled && (isRTPMidi() || isMSCRTPMidi())) {
+    uint16_t modePort = (uint16_t)(isMSCRTPMidi() ? msc_rtpmidi_port : rtpmidi_port);
+    String inst = rtpmidi_session_name.length() > 0 ? rtpmidi_session_name : listenerDeviceName;
+    mdns_txt_item_t txt[] = {
+      {"role", isMSCRTPMidi() ? "msc" : "tally"},
+      {"mode", operatingMode.c_str()}
+    };
+    if (mdns_service_add(inst.c_str(), "_apple-midi", "_udp", modePort, txt, 2) == ESP_OK) {
+      logger("[mDNS] Advertised _apple-midi._udp: " + inst + " on UDP " + String(modePort), "info");
     }
   }
 
+  if (mtc_mdns_enabled && mtc_reader_enabled) {
+    String mtcInst = mtc_session_name.length() > 0 ? mtc_session_name : (listenerDeviceName + "-MTC");
+    mdns_txt_item_t txt[] = {
+      {"role", "mtc"},
+      {"mode", "MTC_READER"}
+    };
+    if (mdns_service_add(mtcInst.c_str(), "_apple-midi", "_udp", (uint16_t)mtc_rtpmidi_port, txt, 2) == ESP_OK) {
+      logger("[mDNS] Advertised separate MTC _apple-midi._udp: " + mtcInst + " on UDP " + String(mtc_rtpmidi_port), "info");
+    }
+  }
+}
+
+void startMidiReceivers() {
+  uint16_t desiredTallyPort = (isRTPMidi() || isMSCRTPMidi()) ? (uint16_t)(isMSCRTPMidi() ? msc_rtpmidi_port : rtpmidi_port) : 0;
+  if (desiredTallyPort > 0) {
+    if (activeRtpMidiBoundPort != desiredTallyPort) {
+      rtpMidiCtrlUdp.stop();
+      rtpMidiDataUdp.stop();
+      rtpMidiCtrlUdp.begin(desiredTallyPort);
+      rtpMidiDataUdp.begin(desiredTallyPort + 1);
+      activeRtpMidiBoundPort = desiredTallyPort;
+      logger("[rtpMIDI] Tally/MSC receiver active on Ctrl:" + String(desiredTallyPort) + " / Data:" + String(desiredTallyPort + 1), "info");
+    }
+  } else if (activeRtpMidiBoundPort > 0) {
+    rtpMidiCtrlUdp.stop();
+    rtpMidiDataUdp.stop();
+    activeRtpMidiBoundPort = 0;
+    rtpmidi_session_connected = false;
+  }
+
+  // Dedicated MTC receiver runs globally in ANY operating mode whenever mtc_reader_enabled == true
+  bool mtcUsesOwnSocket = mtc_reader_enabled && (desiredTallyPort == 0 || (uint16_t)mtc_rtpmidi_port != desiredTallyPort);
+  if (mtcUsesOwnSocket) {
+    if (activeMtcBoundPort != (uint16_t)mtc_rtpmidi_port) {
+      mtcCtrlUdp.stop();
+      mtcDataUdp.stop();
+      mtcCtrlUdp.begin((uint16_t)mtc_rtpmidi_port);
+      mtcDataUdp.begin((uint16_t)mtc_rtpmidi_port + 1);
+      activeMtcBoundPort = (uint16_t)mtc_rtpmidi_port;
+      logger("[MTC rtpMIDI] Separate MTC receiver active on Ctrl:" + String(mtc_rtpmidi_port) + " / Data:" + String(mtc_rtpmidi_port + 1), "info");
+    }
+  } else if (activeMtcBoundPort > 0) {
+    mtcCtrlUdp.stop();
+    mtcDataUdp.stop();
+    activeMtcBoundPort = 0;
+    if (!mtc_reader_enabled) mtc_session_connected = false;
+  }
+
+  registerAppleMidiMDNS();
+}
+
+void connectConfiguredMidiPeers() {
+  if (!networkConnected) return;
+  if ((isRTPMidi() || isMSCRTPMidi()) && rtpmidi_peer_host.length() > 0 && activeRtpMidiBoundPort > 0) {
+    IPAddress targetIP;
+    if (!targetIP.fromString(rtpmidi_peer_host)) WiFi.hostByName(rtpmidi_peer_host.c_str(), targetIP);
+    if (targetIP != IPAddress(0, 0, 0, 0)) {
+      String sess = rtpmidi_session_name.length() > 0 ? rtpmidi_session_name : listenerDeviceName;
+      uint32_t ssrc = isMSCRTPMidi() ? 0x4D534331 : 0x4F4C4D58;
+      sendAppleMidiInvite(rtpMidiCtrlUdp, targetIP, (uint16_t)rtpmidi_peer_port, ssrc, sess);
+    }
+  }
+  if (mtc_reader_enabled && mtc_peer_host.length() > 0 && activeMtcBoundPort > 0) {
+    IPAddress targetIP;
+    if (!targetIP.fromString(mtc_peer_host)) WiFi.hostByName(mtc_peer_host.c_str(), targetIP);
+    if (targetIP != IPAddress(0, 0, 0, 0)) {
+      String sess = mtc_session_name.length() > 0 ? mtc_session_name : (listenerDeviceName + "-MTC");
+      sendAppleMidiInvite(mtcCtrlUdp, targetIP, (uint16_t)mtc_peer_port, 0x4D544331, sess);
+    }
+  }
+}
+
+bool handleAppleMidiControl(WiFiUDP& sock, uint8_t* buf, int len, IPAddress remoteIP, uint16_t remotePort,
+                            uint32_t localSSRC, const String& sessName, bool& sessionConnected,
+                            String& lastSender, IPAddress& peerIp, uint16_t& peerPort, bool isDataPort) {
+  if (len < 4 || buf[0] != 0xFF || buf[1] != 0xFF) return false;
+
+  if (buf[2] == 'I' && buf[3] == 'N' && len >= 16) {
+    uint8_t okResp[80];
+    okResp[0] = 0xFF; okResp[1] = 0xFF;
+    okResp[2] = 'O';  okResp[3] = 'K';
+    memcpy(okResp + 4, buf + 4, 8); // Protocol Version + Initiator Token
+    okResp[12] = (localSSRC >> 24) & 0xFF;
+    okResp[13] = (localSSRC >> 16) & 0xFF;
+    okResp[14] = (localSSRC >> 8)  & 0xFF;
+    okResp[15] = localSSRC & 0xFF;
+    String safeName = sessName.length() > 0 ? sessName.substring(0, 48) : listenerDeviceName;
+    memcpy(okResp + 16, safeName.c_str(), safeName.length());
+    okResp[16 + safeName.length()] = '\0';
+    int okLen = 16 + safeName.length() + 1;
+
+    sock.beginPacket(remoteIP, remotePort);
+    sock.write(okResp, okLen);
+    sock.endPacket();
+
+    sessionConnected = true;
+    lastSender = remoteIP.toString() + ":" + String(remotePort);
+    peerIp = remoteIP;
+    peerPort = isDataPort ? remotePort : (remotePort + 1);
+    logger(String("[AppleMIDI] Accepted IN ('") + safeName + "') from " + lastSender, "info");
+    return true;
+  } else if (buf[2] == 'O' && buf[3] == 'K' && len >= 16) {
+    sessionConnected = true;
+    lastSender = remoteIP.toString() + ":" + String(remotePort);
+    peerIp = remoteIP;
+    peerPort = isDataPort ? remotePort : (remotePort + 1);
+    logger(String("[AppleMIDI] Peer accepted our invite (OK) from ") + lastSender, "info");
+    return true;
+  } else if (buf[2] == 'B' && buf[3] == 'Y') {
+    sessionConnected = false;
+    logger(String("[AppleMIDI] Session ended (BY) by ") + remoteIP.toString(), "info");
+    return true;
+  } else if (buf[2] == 'C' && buf[3] == 'K' && len >= 36) {
+    uint8_t ckResp[36];
+    memcpy(ckResp, buf, 36);
+    uint8_t count = ckResp[12];
+    if (count < 2) {
+      ckResp[12] = count + 1;
+      ckResp[8]  = (localSSRC >> 24) & 0xFF;
+      ckResp[9]  = (localSSRC >> 16) & 0xFF;
+      ckResp[10] = (localSSRC >> 8)  & 0xFF;
+      ckResp[11] = localSSRC & 0xFF;
+      uint64_t ts10k = (uint64_t)(esp_timer_get_time() / 100ULL);
+      int tsOffset = (count == 0) ? 20 : 28;
+      for (int b = 0; b < 8; b++) {
+        ckResp[tsOffset + b] = (uint8_t)((ts10k >> ((7 - b) * 8)) & 0xFF);
+      }
+      sock.beginPacket(remoteIP, remotePort);
+      sock.write(ckResp, 36);
+      sock.endPacket();
+    }
+    return true;
+  }
+  return true;
+}
+
+int extractMidiPayloadOffset(uint8_t* buf, int len) {
+  // RFC 6295 RTP-MIDI packet: V=2 (0x80), PT=97 (0x61), 12-byte RTP header + command section
+  if (len >= 13 && (buf[0] & 0xC0) == 0x80 && (buf[1] & 0x7F) == 0x61) {
+    int csrcCount = buf[0] & 0x0F;
+    int idx = 12 + csrcCount * 4;
+    if (idx >= len) return len;
+    uint8_t cmdHdr = buf[idx];
+    bool longHdr = (cmdHdr & 0x80) != 0;
+    bool hasDelta = (cmdHdr & 0x40) != 0;
+    uint16_t midiLen = longHdr ? (((uint16_t)(cmdHdr & 0x0F) << 8) | (idx + 1 < len ? buf[idx + 1] : 0)) : (cmdHdr & 0x0F);
+    idx += longHdr ? 2 : 1;
+    if (midiLen == 0 || idx >= len) return len;
+    if (hasDelta) {
+      while (idx < len && (buf[idx] & 0x80) != 0) idx++;
+      if (idx < len) idx++;
+    }
+    return idx;
+  }
+  return 0; // Raw MIDI-over-UDP fallback
+}
+
+void parseMtcMidiBytes(uint8_t* buf, int len, int startIdx) {
+  for (int i = startIdx; i < len; i++) {
+    uint8_t b = buf[i];
+    if (b == 0xF1 && i + 1 < len) {
+      uint8_t qData = buf[i + 1];
+      uint8_t piece = (qData >> 4) & 0x07;
+      uint8_t val = qData & 0x0F;
+      mtc_qframe_pieces[piece] = val;
+      if (piece == 7) {
+        int frames  = mtc_qframe_pieces[0] | (mtc_qframe_pieces[1] << 4);
+        int seconds = mtc_qframe_pieces[2] | (mtc_qframe_pieces[3] << 4);
+        int minutes = mtc_qframe_pieces[4] | (mtc_qframe_pieces[5] << 4);
+        int hours   = mtc_qframe_pieces[6] | ((mtc_qframe_pieces[7] & 0x01) << 4);
+        mtc_fps_type = (mtc_qframe_pieces[7] >> 1) & 0x03;
+        char tcBuf[16];
+        snprintf(tcBuf, sizeof(tcBuf), "%02d:%02d:%02d:%02d", hours, minutes, seconds, frames);
+        mtc_timecode_str = String(tcBuf);
+        lastMTCTime = millis();
+        if (mtc_reader_enabled && currentScreen == 0) renderClockTick();
+      }
+      i += 1;
+    } else if (b == 0xF0 && i + 8 < len && buf[i+1] == 0x7F && buf[i+3] == 0x01 && buf[i+4] == 0x01) {
+      int hours   = buf[i+5] & 0x1F;
+      mtc_fps_type = (buf[i+5] >> 5) & 0x03;
+      int minutes = buf[i+6];
+      int seconds = buf[i+7];
+      int frames  = buf[i+8];
+      char tcBuf[16];
+      snprintf(tcBuf, sizeof(tcBuf), "%02d:%02d:%02d:%02d", hours, minutes, seconds, frames);
+      mtc_timecode_str = String(tcBuf);
+      lastMTCTime = millis();
+      if (mtc_reader_enabled && currentScreen == 0) renderClockTick();
+      i += 8;
+    }
+  }
+}
+
+void parseTallyMidiBytes(uint8_t* buf, int len, int startIdx) {
   int targetCh = (rtpmidi_channel == 0) ? -1 : (rtpmidi_channel - 1);
 
-  for (int i = 0; i < len; i++) {
+  for (int i = startIdx; i < len; i++) {
     uint8_t b = buf[i];
     if ((b & 0x80) != 0 && b < 0xF0) {
       uint8_t cmd = b & 0xF0;
@@ -1536,41 +1936,90 @@ void processRTPMidiPacket(uint8_t* buf, int len, IPAddress remoteIP, uint16_t re
           i += 1;
         }
       }
-    } else if (b == 0xF1 && i + 1 < len) {
-      // MTC Quarter-Frame Parser
-      uint8_t qData = buf[i + 1];
-      uint8_t piece = (qData >> 4) & 0x07;
-      uint8_t val = qData & 0x0F;
-      mtc_qframe_pieces[piece] = val;
-      if (piece == 7) {
-        int frames  = mtc_qframe_pieces[0] | (mtc_qframe_pieces[1] << 4);
-        int seconds = mtc_qframe_pieces[2] | (mtc_qframe_pieces[3] << 4);
-        int minutes = mtc_qframe_pieces[4] | (mtc_qframe_pieces[5] << 4);
-        int hours   = mtc_qframe_pieces[6] | ((mtc_qframe_pieces[7] & 0x01) << 4);
-        mtc_fps_type = (mtc_qframe_pieces[7] >> 1) & 0x03;
-        char tcBuf[16];
-        snprintf(tcBuf, sizeof(tcBuf), "%02d:%02d:%02d:%02d", hours, minutes, seconds, frames);
-        mtc_timecode_str = String(tcBuf);
-        lastMTCTime = millis();
-        if (mtc_reader_enabled && currentScreen == 0) renderClockTick();
-      }
-      i += 1;
-    } else if (b == 0xF0 && i + 8 < len && buf[i+1] == 0x7F && buf[i+3] == 0x01 && buf[i+4] == 0x01) {
-      // MTC Full-Frame SysEx Parser
-      int hours   = buf[i+5] & 0x1F;
-      mtc_fps_type = (buf[i+5] >> 5) & 0x03;
-      int minutes = buf[i+6];
-      int seconds = buf[i+7];
-      int frames  = buf[i+8];
-      char tcBuf[16];
-      snprintf(tcBuf, sizeof(tcBuf), "%02d:%02d:%02d:%02d", hours, minutes, seconds, frames);
-      mtc_timecode_str = String(tcBuf);
-      lastMTCTime = millis();
-      if (mtc_reader_enabled && currentScreen == 0) renderClockTick();
-      i += 8;
     }
   }
   evaluateRTPMidiState();
+}
+
+void processRTPMidiPacket(uint8_t* buf, int len, IPAddress remoteIP, uint16_t remotePort) {
+  int startIdx = extractMidiPayloadOffset(buf, len);
+  if (startIdx < len) parseTallyMidiBytes(buf, len, startIdx);
+}
+
+void processTallyMidiReceivers() {
+  if (activeRtpMidiBoundPort == 0) return;
+  uint8_t buf[512];
+  String sess = rtpmidi_session_name.length() > 0 ? rtpmidi_session_name : listenerDeviceName;
+  uint32_t ssrc = isMSCRTPMidi() ? 0x4D534331 : 0x4F4C4D58;
+
+  // Control Port (e.g. 5004)
+  int pktSize = rtpMidiCtrlUdp.parsePacket();
+  while (pktSize > 0) {
+    int len = rtpMidiCtrlUdp.read(buf, sizeof(buf));
+    if (len > 0) {
+      handleAppleMidiControl(rtpMidiCtrlUdp, buf, len, rtpMidiCtrlUdp.remoteIP(), rtpMidiCtrlUdp.remotePort(),
+                             ssrc, sess, rtpmidi_session_connected, rtpmidi_last_sender,
+                             rtpmidi_peer_ip, rtpmidi_peer_data_port, false);
+    }
+    pktSize = rtpMidiCtrlUdp.parsePacket();
+  }
+
+  // Data Port (e.g. 5005)
+  pktSize = rtpMidiDataUdp.parsePacket();
+  while (pktSize > 0) {
+    int len = rtpMidiDataUdp.read(buf, sizeof(buf));
+    if (len > 0) {
+      if (!handleAppleMidiControl(rtpMidiDataUdp, buf, len, rtpMidiDataUdp.remoteIP(), rtpMidiDataUdp.remotePort(),
+                                  ssrc, sess, rtpmidi_session_connected, rtpmidi_last_sender,
+                                  rtpmidi_peer_ip, rtpmidi_peer_data_port, true)) {
+        if (isMSCRTPMidi()) {
+          processMSCRTPMidiPacket(buf, len, rtpMidiDataUdp.remoteIP(), rtpMidiDataUdp.remotePort());
+        } else {
+          processRTPMidiPacket(buf, len, rtpMidiDataUdp.remoteIP(), rtpMidiDataUdp.remotePort());
+        }
+        // Fallback if user intentionally matched MTC port to active tally port
+        if (mtc_reader_enabled && activeMtcBoundPort == 0) {
+          int off = extractMidiPayloadOffset(buf, len);
+          if (off < len) parseMtcMidiBytes(buf, len, off);
+        }
+      }
+    }
+    pktSize = rtpMidiDataUdp.parsePacket();
+  }
+}
+
+void processMtcMidiReceivers() {
+  if (!mtc_reader_enabled || activeMtcBoundPort == 0) return;
+  uint8_t buf[512];
+  String sess = mtc_session_name.length() > 0 ? mtc_session_name : (listenerDeviceName + "-MTC");
+  const uint32_t mtcSSRC = 0x4D544331; // "MTC1"
+
+  // Dedicated MTC Control Port (e.g. 5006)
+  int pktSize = mtcCtrlUdp.parsePacket();
+  while (pktSize > 0) {
+    int len = mtcCtrlUdp.read(buf, sizeof(buf));
+    if (len > 0) {
+      handleAppleMidiControl(mtcCtrlUdp, buf, len, mtcCtrlUdp.remoteIP(), mtcCtrlUdp.remotePort(),
+                             mtcSSRC, sess, mtc_session_connected, mtc_last_sender,
+                             mtc_peer_ip, mtc_peer_data_port, false);
+    }
+    pktSize = mtcCtrlUdp.parsePacket();
+  }
+
+  // Dedicated MTC Data Port (e.g. 5007)
+  pktSize = mtcDataUdp.parsePacket();
+  while (pktSize > 0) {
+    int len = mtcDataUdp.read(buf, sizeof(buf));
+    if (len > 0) {
+      if (!handleAppleMidiControl(mtcDataUdp, buf, len, mtcDataUdp.remoteIP(), mtcDataUdp.remotePort(),
+                                  mtcSSRC, sess, mtc_session_connected, mtc_last_sender,
+                                  mtc_peer_ip, mtc_peer_data_port, true)) {
+        int off = extractMidiPayloadOffset(buf, len);
+        if (off < len) parseMtcMidiBytes(buf, len, off);
+      }
+    }
+    pktSize = mtcDataUdp.parsePacket();
+  }
 }
 
 void evaluateRTPMidiState() {
@@ -1875,28 +2324,8 @@ void sendPromptsideAck() {
 // MIDI Show Control (MSC) over rtpMIDI Parser (RP-002)
 // ==========================================
 void processMSCRTPMidiPacket(uint8_t* buf, int len, IPAddress remoteIP, uint16_t remotePort) {
-  if (len >= 4 && buf[0] == 0xFF && buf[1] == 0xFF) {
-    if (buf[2] == 'I' && buf[3] == 'N') {
-      uint8_t okResp[16];
-      okResp[0] = 0xFF; okResp[1] = 0xFF;
-      okResp[2] = 'O'; okResp[3] = 'K';
-      memcpy(okResp + 4, buf + 4, 8);
-      uint32_t localSSRC = 0x4D534331;
-      memcpy(okResp + 12, &localSSRC, 4);
-      udp.beginPacket(remoteIP, remotePort);
-      udp.write(okResp, 16);
-      udp.endPacket();
-      logger(String("[MSC rtpMIDI] AppleMIDI session accepted from ") + remoteIP.toString(), "info");
-      return;
-    } else if (buf[2] == 'C' && buf[3] == 'K') {
-      udp.beginPacket(remoteIP, remotePort);
-      udp.write(buf, len);
-      udp.endPacket();
-      return;
-    }
-  }
-
-  for (int i = 0; i < len - 5; i++) {
+  int startIdx = extractMidiPayloadOffset(buf, len);
+  for (int i = startIdx; i < len - 5; i++) {
     if (buf[i] == 0xF0 && buf[i+1] == 0x7F) {
       uint8_t devId = buf[i+2];
       uint8_t subId1 = buf[i+3];
@@ -2003,10 +2432,26 @@ void computeTallyVisualState(uint16_t& bgColor, uint16_t& textColor, String& sta
   statusLabel = "STANDBY";
   bool flashPhase = (millis() / 400) % 2 == 0;
 
+  String snapType = actualType;
+  String snapColor = actualColor;
+  int snapVmixVal = vmix_tally_val;
+  bool snapVmixConn = vmixConnected;
+  if (taStateMutex != NULL && xSemaphoreTake(taStateMutex, pdMS_TO_TICKS(15)) == pdTRUE) {
+    snapType = actualType;
+    snapColor = actualColor;
+    snapVmixVal = vmix_tally_val;
+    snapVmixConn = vmixConnected;
+    xSemaphoreGive(taStateMutex);
+  }
+
   if (isP2PMode() && p2p_disconnected_state) {
     bgColor = flashPhase ? TFT_YELLOW : TFT_BLACK;
     textColor = flashPhase ? TFT_BLACK : TFT_YELLOW;
     statusLabel = "DISCONNECTED";
+  } else if (isVmix()) {
+    if (snapVmixVal == 1)      { bgColor = TFT_RED;   textColor = TFT_WHITE; statusLabel = "PROGRAM"; }
+    else if (snapVmixVal == 2) { bgColor = TFT_GREEN; textColor = TFT_BLACK; statusLabel = "PREVIEW"; }
+    else                       { bgColor = TFT_BLACK; textColor = TFT_WHITE; statusLabel = snapVmixConn ? "STANDBY" : "vMix WAIT"; }
   } else if (isPromptside()) {
     if (promptside_state == "standby_ack") {
       if (!promptside_ack_done) {
@@ -2026,7 +2471,7 @@ void computeTallyVisualState(uint16_t& bgColor, uint16_t& textColor, String& sta
       bgColor = TFT_GREEN; textColor = TFT_BLACK;
       statusLabel = String("GO ") + (msc_current_cue.length() > 0 ? msc_current_cue : "");
     } else if (msc_state == "standby") {
-      if (actualType == "\"flashred\"") {
+      if (snapType == "\"flashred\"") {
         bgColor = flashPhase ? TFT_RED : TFT_BLACK;
         textColor = flashPhase ? TFT_WHITE : TFT_RED;
         statusLabel = String("STANDBY+ ") + (msc_current_cue.length() > 0 ? msc_current_cue : "");
@@ -2054,18 +2499,18 @@ void computeTallyVisualState(uint16_t& bgColor, uint16_t& textColor, String& sta
       bgColor = TFT_BLACK; textColor = TFT_WHITE; statusLabel = "OFF";
     }
   } else if (isTSL31Listener()) {
-    if (actualType == "\"program\"")      { bgColor = TFT_RED;    textColor = TFT_WHITE; statusLabel = "PROGRAM"; }
-    else if (actualType == "\"preview\"") { bgColor = TFT_GREEN;  textColor = TFT_BLACK; statusLabel = "PREVIEW"; }
-    else if (actualType == "\"aux\"")     { bgColor = TFT_ORANGE; textColor = TFT_BLACK; statusLabel = "AUX"; }
-    else                                  { bgColor = TFT_BLACK;  textColor = TFT_WHITE; statusLabel = "STANDBY"; }
+    if (snapType == "\"program\"")      { bgColor = TFT_RED;    textColor = TFT_WHITE; statusLabel = "PROGRAM"; }
+    else if (snapType == "\"preview\"") { bgColor = TFT_GREEN;  textColor = TFT_BLACK; statusLabel = "PREVIEW"; }
+    else if (snapType == "\"aux\"")     { bgColor = TFT_ORANGE; textColor = TFT_BLACK; statusLabel = "AUX"; }
+    else                                { bgColor = TFT_BLACK;  textColor = TFT_WHITE; statusLabel = "STANDBY"; }
   } else if (isTSL50Listener()) {
-    if (actualType == "\"program\"")      { bgColor = TFT_RED;    textColor = TFT_WHITE; statusLabel = "PROGRAM"; }
-    else if (actualType == "\"preview\"") { bgColor = TFT_GREEN;  textColor = TFT_BLACK; statusLabel = "PREVIEW"; }
-    else if (actualType == "\"aux\"")     { bgColor = TFT_ORANGE; textColor = TFT_BLACK; statusLabel = "AUX"; }
-    else if (actualType == "\"blue\"")    { bgColor = TFT_BLUE;   textColor = TFT_WHITE; statusLabel = "BLUE"; }
-    else                                  { bgColor = TFT_BLACK;  textColor = TFT_WHITE; statusLabel = "STANDBY"; }
+    if (snapType == "\"program\"")      { bgColor = TFT_RED;    textColor = TFT_WHITE; statusLabel = "PROGRAM"; }
+    else if (snapType == "\"preview\"") { bgColor = TFT_GREEN;  textColor = TFT_BLACK; statusLabel = "PREVIEW"; }
+    else if (snapType == "\"aux\"")     { bgColor = TFT_ORANGE; textColor = TFT_BLACK; statusLabel = "AUX"; }
+    else if (snapType == "\"blue\"")    { bgColor = TFT_BLUE;   textColor = TFT_WHITE; statusLabel = "BLUE"; }
+    else                                { bgColor = TFT_BLACK;  textColor = TFT_WHITE; statusLabel = "STANDBY"; }
   } else if (isETCCueSystem()) {
-    if (actualType == "\"standby\"") {
+    if (snapType == "\"standby\"") {
       if (!cuesystem_ack_active) {
         bgColor = flashPhase ? TFT_RED : TFT_BLACK;
         textColor = flashPhase ? TFT_WHITE : TFT_RED;
@@ -2073,31 +2518,31 @@ void computeTallyVisualState(uint16_t& bgColor, uint16_t& textColor, String& sta
       } else {
         bgColor = TFT_RED; textColor = TFT_WHITE; statusLabel = "ACKNOWLEDGED";
       }
-    } else if (actualType == "\"program\"") {
+    } else if (snapType == "\"program\"") {
       bgColor = TFT_GREEN; textColor = TFT_BLACK; statusLabel = "GO";
     } else {
       bgColor = TFT_BLACK; textColor = TFT_WHITE; statusLabel = "CUE OFF";
     }
-  } else if (actualType == "\"flashred\"") {
+  } else if (snapType == "\"flashred\"") {
     bgColor = flashPhase ? TFT_RED : TFT_BLACK;
     textColor = flashPhase ? TFT_WHITE : TFT_RED;
     statusLabel = "FLASH RED";
-  } else if (actualType == "\"program\"") {
+  } else if (snapType == "\"program\"") {
     bgColor = TFT_RED; textColor = TFT_WHITE;
     statusLabel = isNMOSIS07() ? "ON-AIR" : (isRTPMidi() || isOSC() ? "RED" : "PROGRAM");
-  } else if (actualType == "\"preview\"") {
+  } else if (snapType == "\"preview\"") {
     bgColor = TFT_GREEN; textColor = TFT_BLACK;
     statusLabel = (isRTPMidi() || isOSC()) ? "GREEN" : "PREVIEW";
-  } else if (actualType == "\"yellow\"") {
+  } else if (snapType == "\"yellow\"") {
     bgColor = TFT_YELLOW; textColor = TFT_BLACK; statusLabel = "YELLOW";
-  } else if (actualType == "\"blue\"") {
+  } else if (snapType == "\"blue\"") {
     bgColor = TFT_BLUE; textColor = TFT_WHITE; statusLabel = "BLUE";
-  } else if (actualType == "\"white\"") {
+  } else if (snapType == "\"white\"") {
     bgColor = TFT_WHITE; textColor = TFT_BLACK; statusLabel = "WHITE";
-  } else if (actualType == "\"aux\"") {
+  } else if (snapType == "\"aux\"") {
     bgColor = TFT_ORANGE; textColor = TFT_BLACK; statusLabel = "AUX";
-  } else if (actualColor.length() > 0 && actualColor != "invalid") {
-    String hexstring = actualColor;
+  } else if (snapColor.length() > 0 && snapColor != "invalid") {
+    String hexstring = snapColor;
     hexstring.replace("#", "");
     long number = (long)strtol(hexstring.c_str(), NULL, 16);
     int r = (number >> 16) & 0xFF;
@@ -2105,7 +2550,7 @@ void computeTallyVisualState(uint16_t& bgColor, uint16_t& textColor, String& sta
     int b = number & 0xFF;
     bgColor = lcd.color565(r, gr, b);
     textColor = (r + gr + b > 380) ? TFT_BLACK : TFT_WHITE;
-    statusLabel = actualType;
+    statusLabel = snapType;
     statusLabel.replace("\"", "");
     statusLabel.toUpperCase();
   }
@@ -2170,6 +2615,14 @@ void renderScreen() {
 
   bool backgroundChanged = (!screenHasRenderedOnce || currentScreen != lastRenderedScreen || bgColor != lastRenderedBgColor);
 
+  String snapDeviceName = DeviceName;
+  bool snapVmixConn = vmixConnected;
+  if (taStateMutex != NULL && xSemaphoreTake(taStateMutex, pdMS_TO_TICKS(15)) == pdTRUE) {
+    snapDeviceName = DeviceName;
+    snapVmixConn = vmixConnected;
+    xSemaphoreGive(taStateMutex);
+  }
+
   auto renderContent = [&](LovyanGFX* g, bool clearFullBg) {
     int W = g->width();
     int H = g->height();
@@ -2184,9 +2637,13 @@ void renderScreen() {
       drawTopBannerWidget(g, 8, 8, W - 16, 38, bgColor, false);
 
       // Center Label / Station / Cue Text
-      String displayName = DeviceName;
+      String displayName = snapDeviceName;
       if (isP2PMode() && p2p_disconnected_state) {
         displayName = "PEER LOST";
+      } else if (isVmix()) {
+        if (vmix_label.length() > 0) displayName = vmix_label;
+        else if (snapDeviceName.length() > 0 && snapDeviceName != "unassigned" && snapDeviceName != "CAM 1 PRES") displayName = snapDeviceName;
+        else displayName = String("vMix IN ") + String(vmix_input);
       } else if (isPromptside()) {
         displayName = promptside_cue_text.length() > 0 ? promptside_cue_text : (promptside_state == "go" ? "GO!" : (promptside_state == "standby_ack" ? "STANDBY" : (String("CH ") + promptside_channel)));
       } else if (isMSCRTPMidi()) {
@@ -2241,9 +2698,10 @@ void renderScreen() {
       g->print("[" + operatingMode + "] ");
       if (isPromptside()) g->print("Ch:" + promptside_channel + (promptside_ack_done ? " ACKED" : ""));
       else if (isETCCueSystem()) g->print("Ch:" + String(cuesystem_channel) + (cuesystem_ack_active ? " ACKED" : ""));
+      else if (isVmix()) g->print(String("In:") + String(vmix_input) + (snapVmixConn ? " OK" : " --"));
       else if (isMSCRTPMidi()) g->print("Cmd:" + msc_last_command);
       else if (isP2PMode()) g->print(p2p_disconnected_state ? ">>> PEER LOST <<<" : ("Grp:" + pairingGroup));
-      else g->print(socket.isConnected() ? "TA:Online" : (ch1state ? "CUE:ACTIVE" : "TA:Wait"));
+      else g->print(taSocketConnected ? "TA:Online" : (ch1state ? "CUE:ACTIVE" : "TA:Wait"));
 
       g->setCursor(12, H - 36);
       if (isTP() && presenterCueActive) {
@@ -2293,12 +2751,13 @@ void renderScreen() {
       String bufDesc = doubleBufferEnabled ? (String(doubleBufferColorDepth) + "-bit DMA") : "Direct";
       g->setCursor(10, y);      g->println("Net:  " + getNetworkModeStr()); y += 15;
       g->setCursor(10, y);      g->println("IP:   " + getNetworkIPStr() + (useDHCP ? " (DHCP)" : " (Static)")); y += 15;
-      g->setCursor(10, y);      g->println("Mode: " + operatingMode + " | Port: " + String(getActiveListenPort())); y += 15;
+      uint16_t diagPort = (isRTPMidi() || isMSCRTPMidi()) ? (uint16_t)(isMSCRTPMidi() ? msc_rtpmidi_port : rtpmidi_port) : getActiveListenPort();
+      g->setCursor(10, y);      g->println("Mode: " + operatingMode + " | Port: " + String(diagPort)); y += 15;
       g->setCursor(10, y);      g->println("LCD:  ST7789V2 " + String(W) + "x" + String(H) + " (" + bufDesc + ")"); y += 15;
       g->setCursor(10, y);      g->println("Touch: CST816T I2C (0x15) | Rot: " + String(currentRotation * 90) + "d"); y += 15;
 
       if (mtc_reader_enabled) {
-        g->setCursor(10, y); g->println("MTC:  " + mtc_timecode_str); y += 15;
+        g->setCursor(10, y); g->println("MTC:  " + mtc_timecode_str + " (UDP " + String(mtc_rtpmidi_port) + ")"); y += 15;
       } else {
         g->setCursor(10, y); g->println("TZ:   " + timezone_name); y += 15;
       }
@@ -2313,9 +2772,13 @@ void renderScreen() {
         g->setCursor(10, y);
         g->println(p2p_disconnected_state ? "Peer: DISCONNECTED (>4 missed)" : ("Peer: " + (pairedTargetIP.length() > 0 ? pairedTargetIP : "Broadcast")));
         y += 15;
+      } else if (isVmix()) {
+        g->setCursor(10, y);
+        g->println(String("vMix: ") + vmix_host + ":" + String(vmix_port) + " I" + String(vmix_input) + (snapVmixConn ? " [OK]" : " [Wait]"));
+        y += 15;
       } else if (usesTallyArbiter()) {
         g->setCursor(10, y);
-        g->println(String("TA:   ") + tallyarbiter_host + ":" + tallyarbiter_port + (socket.isConnected() ? " [OK]" : " [Wait]"));
+        g->println(String("TA:   ") + tallyarbiter_host + ":" + tallyarbiter_port + (taSocketConnected ? " [OK]" : " [Wait]"));
         y += 15;
       }
 
@@ -2438,7 +2901,11 @@ void setupWebServer() {
     html += String(cpu_freq_mhz) + " MHz</strong> | Radios: <strong>";
     html += wifiDisabledForEth ? "<span class='badge badge-blue'>RF OFF (PoE)</span>" : "<span class='badge badge-purple'>Wi-Fi Active</span>";
     html += F("</strong> | Touch: <strong>CST816T (1-Tap=Action, 2-Tap=Diag)</strong></p>"
-              "<p style='margin:8px 0 0 0;'><a href='/manual' target='_blank' style='color:#38bdf8;text-decoration:none;font-weight:600;font-size:13px;'>&#128214; View Full HTML User Manual &amp; Documentation &rarr;</a></p>"
+              "<div style='display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;'>"
+              "<a href='/wifi' style='background:#0f172a;border:1px solid #334155;color:#38bdf8;padding:7px 12px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;'>&#128246; Wi-Fi Config &amp; AP Scan</a>"
+              "<a href='/rtpmidi' style='background:#0f172a;border:1px solid #334155;color:#a78bfa;padding:7px 12px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;'>&#127925; rtpMIDI &amp; MTC mDNS Setup</a>"
+              "<a href='/manual' target='_blank' style='background:#0f172a;border:1px solid #334155;color:#34d399;padding:7px 12px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;'>&#128214; User Manual</a>"
+              "</div>"
               "</div><div class='card'>"
               "<form action='/save' method='POST'>"
               "<h2>Operating Mode &amp; Role</h2>"
@@ -2457,6 +2924,7 @@ void setupWebServer() {
     html += F("<option value='TSL_31'"); if (operatingMode == "TSL_31") html += F(" selected"); html += F(">TSL 3.1 Listener (UDP / TCP with centered name)</option>");
     html += F("<option value='TSL_50'"); if (operatingMode == "TSL_50") html += F(" selected"); html += F(">TSL 5.0 Listener (UDP / TCP with centered name)</option>");
     html += F("<option value='OSC_CueLight'"); if (operatingMode == "OSC_CueLight") html += F(" selected"); html += F(">OSC Cue Light (RSMCK iOS Protocol - Port 53000)</option>");
+    html += F("<option value='vMix'"); if (operatingMode == "vMix") html += F(" selected"); html += F(">vMix Tally (TCP API Port 8099)</option>");
     html += F("</select>"
               "<div class='section-box'>"
               "<h2>Timezone, Orientation &amp; Peripherals</h2>"
@@ -2476,7 +2944,7 @@ void setupWebServer() {
     html += custom_tz_posix;
     html += F("'></div></div>"
               "<div class='grid-3' style='margin-top:10px;'>"
-              "<div><label>MTC Reader (rtpMIDI)</label><select name='mtc_reader'>"
+              "<div><label>Separate MTC Reader (<a href='/rtpmidi' style='color:#38bdf8;'>UDP " + String(mtc_rtpmidi_port) + "</a>)</label><select name='mtc_reader'>"
               "<option value='0'"); if (!mtc_reader_enabled) html += F(" selected"); html += F(">Disabled</option>"
               "<option value='1'"); if (mtc_reader_enabled) html += F(" selected"); html += F(">Enabled</option></select></div>"
               "<div><label>External I2C ENV Sensor</label><select name='env_sensor'>"
@@ -2586,6 +3054,16 @@ void setupWebServer() {
               "<div class='grid-2'><div><label>UDP Port</label><input type='number' name='osccue_port' value='"); html += String(osccue_port); html += F("'></div>"
               "<div><label>Station ID</label><input type='text' name='osccue_station' value='"); html += osccue_station_id; html += F("'></div></div>"
               "<label>Banner Text</label><input type='text' name='osccue_banner' value='"); html += osccue_banner; html += F("'></div>"
+              "<div id='sec-vmix' class='section-box'><h2>vMix Live Production Tally (TCP API)</h2>"
+              "<div class='grid-2'><div><label>vMix Workstation Host / IP</label><input type='text' name='vmix_host' value='"); html += vmix_host; html += F("' placeholder='192.168.1.100'></div>"
+              "<div><label>vMix TCP API Port (Default: 8099)</label><input type='number' name='vmix_port' value='"); html += String(vmix_port); html += F("'></div></div>"
+              "<div class='grid-2'><div><label>vMix Input Number (1 - 999)</label><input type='number' name='vmix_input' min='1' max='999' value='"); html += String(vmix_input); html += F("'></div>"
+              "<div><label>Custom Display Label (Optional)</label><input type='text' name='vmix_label' value='"); html += vmix_label; html += F("' placeholder='e.g. CAM 1'></div></div>"
+              "<div><label>Screen Touch Action</label><select name='vmix_btn'>"
+              "<option value='0'"); if (vmix_btn_action == 0) html += F(" selected"); html += F(">Switch Diagnostics Screen (Safe Default)</option>"
+              "<option value='1'"); if (vmix_btn_action == 1) html += F(" selected"); html += F(">Send Input to Preview (FUNCTION PreviewInput)</option>"
+              "<option value='2'"); if (vmix_btn_action == 2) html += F(" selected"); html += F(">Cut Input to Program (FUNCTION ActiveInput)</option></select></div>"
+              "<div class='hint'>Subscribes natively to vMix TCP API (SUBSCRIBE TALLY on port 8099). Red = Program (1), Green = Preview (2), Black = Off (0).</div></div>"
               "<button type='submit' class='btn-save'>Save Settings &amp; Apply</button></form></div>"
               "<div id='sec-p2p-scan' class='card'><h2>Zero-Conf P2P Discovery (mDNS)</h2>"
               "<button type='button' class='btn-scan' onclick='scanPeers()'>Scan for Local CueLX / TSL Peers</button>"
@@ -2606,7 +3084,8 @@ void setupWebServer() {
               "document.getElementById('sec-osc').style.display=(m==='OSC')?'block':'none';"
               "document.getElementById('sec-tsl31').style.display=(m==='TSL_31')?'block':'none';"
               "document.getElementById('sec-tsl50').style.display=(m==='TSL_50')?'block':'none';"
-              "document.getElementById('sec-osccue').style.display=(m==='OSC_CueLight')?'block':'none';}"
+              "document.getElementById('sec-osccue').style.display=(m==='OSC_CueLight')?'block':'none';"
+              "document.getElementById('sec-vmix').style.display=(m==='vMix')?'block':'none';}"
               "updateModeUI();toggleCustomTZ();"
               "async function scanPeers(){const l=document.getElementById('peers-list');l.innerHTML='Scanning...';"
               "try{const r=await fetch('/api/discover');const p=await r.json();if(!p||!p.length){l.innerHTML='No peers found.';return;}"
@@ -2665,14 +3144,45 @@ void setupWebServer() {
     obj["cuesystemPort"] = cuesystem_port;
     obj["cuesystemChannel"] = cuesystem_channel;
     obj["cuesystemAckActive"] = cuesystem_ack_active;
+    obj["cuesystemStandbyActive"] = cuesystem_standby_active;
     obj["nmosAutoDisc"] = nmos_auto_discover;
     obj["nmosHost"] = nmos_registry_host;
     obj["nmosPort"] = nmos_registry_port;
     obj["nmosSource"] = nmos_source_id;
+    obj["nmosTopic"] = nmos_program_topic;
     obj["nmosPrgTopic"] = nmos_program_topic;
     obj["nmosPvwTopic"] = nmos_preview_topic;
     obj["nmosAuxTopic"] = nmos_aux_topic;
     obj["nmosOnAir"] = nmos_is_on_air;
+    obj["midiPort"] = rtpmidi_port;
+    obj["midiChan"] = rtpmidi_channel;
+    obj["midiTrig"] = rtpmidi_trigger_type;
+    obj["oscPort"] = osc_port;
+    obj["oscPrefix"] = osc_prefix;
+    obj["oscMsg"] = osc_custom_message;
+    obj["isPresenter"] = isPresenter();
+    obj["isTP"] = isTP();
+    obj["isP2P"] = isP2PMode();
+    obj["isCueSystem"] = isETCCueSystem();
+    obj["isNMOS"] = isNMOSIS07();
+    obj["isRTPMidi"] = isRTPMidi();
+    obj["isOSC"] = isOSC();
+    obj["isTSL31"] = isTSL31Listener();
+    obj["isTSL50"] = isTSL50Listener();
+    obj["isOSCCueLight"] = isOSCCueLight();
+    obj["isPromptside"] = isPromptside();
+    obj["isMSCRTPMidi"] = isMSCRTPMidi();
+    obj["isVmix"] = isVmix();
+    obj["vmixHost"] = vmix_host;
+    obj["vmixPort"] = vmix_port;
+    obj["vmixInput"] = vmix_input;
+    obj["vmixLabel"] = vmix_label;
+    obj["vmixBtnAction"] = vmix_btn_action;
+    obj["vmixConnected"] = vmixConnected;
+    obj["vmixTallyState"] = vmix_tally_val;
+    obj["pairingGroup"] = pairingGroup;
+    obj["pairedTargetIP"] = pairedTargetIP;
+    obj["pairedTargetName"] = pairedTargetName;
     obj["tsl31Port"] = tsl31_port;
     obj["tsl31Transport"] = tsl31_transport;
     obj["tsl31Address"] = tsl31_address;
@@ -2685,25 +3195,57 @@ void setupWebServer() {
     obj["oscCuePort"] = osccue_port;
     obj["oscCueStation"] = osccue_station_id;
     obj["oscCueBanner"] = osccue_banner;
+    obj["oscCueMessage"] = osccue_message;
     obj["oscCueState"] = osccue_state;
+    obj["oscCueAckDone"] = osccue_ack_done;
     obj["timezone"] = timezone_name;
+    obj["customTZPosix"] = custom_tz_posix;
     obj["mtcReader"] = mtc_reader_enabled;
     obj["mtcTimecode"] = mtc_timecode_str;
     obj["envEnabled"] = env_sensor_enabled;
+    obj["envDetected"] = env_sensor_detected;
     obj["envTemp"] = env_temperature;
     obj["envHum"] = env_humidity;
     obj["envPress"] = env_pressure;
     obj["promptPort"] = promptside_port;
     obj["promptChannel"] = promptside_channel;
     obj["promptWing"] = promptside_wing_label;
+    obj["promptText"] = promptside_cue_text;
     obj["promptState"] = promptside_state;
+    obj["promptAckDone"] = promptside_ack_done;
     obj["mscPort"] = msc_rtpmidi_port;
     obj["mscDevId"] = msc_device_id;
+    obj["mscCmdFmt"] = msc_cmd_format;
     obj["mscCurrentCue"] = msc_current_cue;
+    obj["mscLastCmd"] = msc_last_command;
     obj["mscState"] = msc_state;
+    obj["midiBtnType"] = midi_btn_type;
+    obj["midiBtnChan"] = midi_btn_channel;
+    obj["midiBtnNum"] = midi_btn_number;
+    obj["midiBtnPress"] = midi_btn_val_press;
+    obj["midiBtnRelease"] = midi_btn_val_release;
     obj["p2pDisconnected"] = p2p_disconnected_state;
     obj["p2pMissed"] = p2p_missed_heartbeats;
+    obj["presenterCueActive"] = presenterCueActive;
     obj["wifiDisabledForEth"] = wifiDisabledForEth;
+    obj["wifiSsid"] = wifi_ssid;
+    obj["wifiKeepOn"] = wifi_keep_on_with_poe;
+    obj["rtpMidiSession"] = rtpmidi_session_name;
+    obj["rtpMidiMdns"] = rtpmidi_mdns_enabled;
+    obj["rtpMidiPeerHost"] = rtpmidi_peer_host;
+    obj["rtpMidiPeerPort"] = rtpmidi_peer_port;
+    obj["rtpMidiConnected"] = rtpmidi_session_connected;
+    obj["mtcPort"] = mtc_rtpmidi_port;
+    obj["mtcSession"] = mtc_session_name;
+    obj["mtcMdns"] = mtc_mdns_enabled;
+    obj["mtcPeerHost"] = mtc_peer_host;
+    obj["mtcPeerPort"] = mtc_peer_port;
+    obj["mtcConnected"] = mtc_session_connected;
+    obj["host"] = tallyarbiter_host;
+    obj["port"] = tallyarbiter_port;
+    obj["tslPort"] = tallyarbiter_TSLport;
+    obj["listenerName"] = listenerDeviceName;
+    obj["deviceId"] = DeviceId;
     obj["deviceName"] = DeviceName;
     obj["doubleBuffer"] = doubleBufferEnabled;
     obj["actualType"] = actualType;
@@ -2711,6 +3253,369 @@ void setupWebServer() {
     obj["mode"] = isEthernetActive() ? "ETH" : "WIFI";
     obj["ip"] = getNetworkIPStr();
     request->send(200, "application/json", JSON.stringify(obj));
+  });
+
+  // ==========================================
+  // Dedicated Wi-Fi Configuration Page & AP Scanner (/wifi)
+  // ==========================================
+  server.on("/wifi", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String wHtml = F("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                     "<title>Wi-Fi Configuration - Olimex ESP32-PoE2</title><style>"
+                     "body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0f172a;color:#f1f5f9;padding:16px;max-width:660px;margin:auto}"
+                     ".card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:16px}"
+                     "h1{font-size:20px;margin:0 0 6px 0;color:#38bdf8}h2{font-size:14px;color:#94a3b8;margin:0 0 12px 0;text-transform:uppercase}"
+                     "label{display:block;margin-top:12px;font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase}"
+                     "input,select{width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #475569;color:#f8fafc;padding:10px;border-radius:6px;margin-top:4px;font-size:14px}"
+                     "button{background:#0284c7;color:#fff;font-weight:600;padding:10px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px}"
+                     ".btn-scan{background:#059669;width:100%}.btn-save{background:#2563eb;width:100%;margin-top:16px}.btn-del{background:#dc2626;margin-top:10px;width:100%}"
+                     ".ap-item{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;margin-top:8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer}"
+                     ".ap-item:hover{border-color:#38bdf8}.nav{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}"
+                     ".nav a{background:#1e293b;border:1px solid #334155;color:#cbd5e1;padding:6px 12px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600}"
+                     ".badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:700;background:#0284c7;color:#fff}"
+                     "</style></head><body>"
+                     "<div class='nav'><a href='/'>&larr; Dashboard</a><a href='/wifi' style='border-color:#38bdf8;color:#38bdf8;'>Wi-Fi Config</a><a href='/rtpmidi'>rtpMIDI &amp; MTC</a></div>"
+                     "<div class='card'><h1>Wi-Fi Configuration &amp; Access Point Scanner</h1>"
+                     "<p style='font-size:13px;color:#cbd5e1;'>PoE Link: <span class='badge'>");
+    wHtml += isEthernetActive() ? "Ethernet Connected (" + ETH.localIP().toString() + ")" : "Ethernet Unplugged";
+    wHtml += F("</span> &nbsp; Wi-Fi Radio: <strong>");
+    wHtml += wifiDisabledForEth ? "OFF (PoE Eco Shutdown)" : (WiFi.status() == WL_CONNECTED ? ("Connected: " + WiFi.SSID() + " (" + WiFi.localIP().toString() + ")") : "STA Ready / Standby");
+    wHtml += F("</strong></p>"
+               "<p style='font-size:12px;color:#94a3b8;'>Note: Scanning temporarily wakes the Wi-Fi radio even when PoE has disabled Wi-Fi, then restores RF shutdown automatically after scan completion.</p>"
+               "<button type='button' id='scan-btn' class='btn-scan' onclick='scanAPs()'>Scan for Wi-Fi Access Points</button>"
+               "<div id='ap-list' style='margin-top:10px;font-size:12px;color:#94a3b8;'></div></div>"
+               "<div class='card'><h2>Saved Wi-Fi Credentials</h2>"
+               "<form onsubmit='saveWifi(event)'>"
+               "<label>Wi-Fi Network SSID</label><input type='text' id='ssid' value='");
+    wHtml += wifi_ssid;
+    wHtml += F("' placeholder='Enter SSID or select from scan above'>"
+               "<label>Wi-Fi Password (WPA2 / WPA3)</label><input type='password' id='pass' value='");
+    wHtml += wifi_pass;
+    wHtml += F("' placeholder='Leave blank for open network'>"
+               "<label>Behavior When PoE Ethernet is Active</label><select id='keep_on'>"
+               "<option value='0'"); if (!wifi_keep_on_with_poe) wHtml += F(" selected"); wHtml += F(">Turn Wi-Fi OFF when PoE Ethernet is up (Coolest / Failover Ready)</option>"
+               "<option value='1'"); if (wifi_keep_on_with_poe) wHtml += F(" selected"); wHtml += F(">Keep Wi-Fi Connected alongside PoE Ethernet</option></select>"
+               "<button type='submit' class='btn-save'>Save Wi-Fi Configuration</button></form>"
+               "<button type='button' class='btn-del' onclick='forgetWifi()'>Forget Saved Wi-Fi Credentials</button>"
+               "<div id='wifi-msg' style='margin-top:10px;font-size:13px;color:#34d399;'></div></div>"
+               "<script>"
+               "async function scanAPs(){const b=document.getElementById('scan-btn'),l=document.getElementById('ap-list');b.disabled=true;b.textContent='Waking Wi-Fi & Scanning...';l.innerHTML='Scanning nearby 2.4GHz access points...';"
+               "try{await fetch('/api/wifi/scan?start=1');for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,500));const res=await fetch('/api/wifi/scan');const d=await res.json();"
+               "if(!d.scanning){const nets=d.networks||[];window._aps=nets;l.innerHTML=nets.length?nets.map((n,i)=>`<div class='ap-item' onclick='selectAp(${i})'><div><strong style='color:#f8fafc;'>${n.ssid||'(Hidden)'}</strong><div style='color:#94a3b8;font-size:11px;'>Ch ${n.channel} • ${n.secure?'WPA/WPA2':'Open'}</div></div><span class='badge'>${n.rssi} dBm</span></div>`).join(''):'No access points detected.';break;}}}catch(e){l.innerHTML='Scan failed: '+e.message;}finally{b.disabled=false;b.textContent='Scan for Wi-Fi Access Points';}}"
+               "function selectAp(i){if(window._aps&&window._aps[i])document.getElementById('ssid').value=window._aps[i].ssid;}"
+               "async function saveWifi(e){e.preventDefault();const f=new FormData();f.append('ssid',document.getElementById('ssid').value);f.append('pass',document.getElementById('pass').value);f.append('keep_on',document.getElementById('keep_on').value);"
+               "const r=await fetch('/api/wifi/save',{method:'POST',body:f});const d=await r.json();document.getElementById('wifi-msg').textContent=d.message||'Saved!';}"
+               "async function forgetWifi(){await fetch('/api/wifi/forget',{method:'POST'});document.getElementById('ssid').value='';document.getElementById('pass').value='';document.getElementById('wifi-msg').textContent='Wi-Fi credentials cleared.';}"
+               "</script></body></html>");
+    request->send(200, "text/html", wHtml);
+  });
+
+  // REST API: GET /api/wifi/status
+  server.on("/api/wifi/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    JSONVar obj;
+    obj["ethernetActive"] = isEthernetActive();
+    obj["wifiDisabledForEth"] = wifiDisabledForEth;
+    obj["wifiConnected"] = (WiFi.status() == WL_CONNECTED);
+    obj["connectedSsid"] = (WiFi.status() == WL_CONNECTED) ? WiFi.SSID() : "";
+    obj["wifiIp"] = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "0.0.0.0";
+    obj["savedSsid"] = wifi_ssid;
+    obj["keepOnWithPoE"] = wifi_keep_on_with_poe;
+    request->send(200, "application/json", JSON.stringify(obj));
+  });
+
+  // REST API: GET /api/wifi/scan (Temporarily wakes Wi-Fi if OFF, scans APs, restores PoE OFF state)
+  server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+    bool forceStart = request->hasParam("start") && request->getParam("start")->value() == "1";
+    int st = WiFi.scanComplete();
+
+    if (forceStart || st == WIFI_SCAN_FAILED) {
+      wifiScanInProgress = true;
+      wifiScanStartedAt = millis();
+      if (wifiDisabledForEth || WiFi.getMode() == WIFI_OFF) {
+        wifiWasOffBeforeScan = true;
+        esp_wifi_start();
+        WiFi.mode(WIFI_STA);
+        delay(80);
+      } else {
+        wifiWasOffBeforeScan = false;
+      }
+      WiFi.scanDelete();
+      WiFi.scanNetworks(true, true);
+      JSONVar resp;
+      resp["scanning"] = true;
+      resp["wifiWasOff"] = wifiWasOffBeforeScan;
+      resp["networks"] = JSON.parse("[]");
+      request->send(200, "application/json", JSON.stringify(resp));
+      return;
+    }
+
+    if (st == WIFI_SCAN_RUNNING) {
+      JSONVar resp;
+      resp["scanning"] = true;
+      resp["networks"] = JSON.parse("[]");
+      request->send(200, "application/json", JSON.stringify(resp));
+      return;
+    }
+
+    JSONVar arr = JSON.parse("[]");
+    for (int i = 0; i < st; ++i) {
+      String ssid = WiFi.SSID(i);
+      if (ssid.length() == 0) continue;
+      JSONVar ap;
+      ap["ssid"] = ssid;
+      ap["rssi"] = (int)WiFi.RSSI(i);
+      ap["channel"] = (int)WiFi.channel(i);
+      ap["secure"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+      arr[arr.length()] = ap;
+    }
+    WiFi.scanDelete();
+
+    if (wifiWasOffBeforeScan && isEthernetActive() && !wifi_keep_on_with_poe) {
+      WiFi.disconnect(false);
+      WiFi.mode(WIFI_OFF);
+      esp_wifi_stop();
+      wifiDisabledForEth = true;
+    }
+    bool wasOff = wifiWasOffBeforeScan;
+    wifiWasOffBeforeScan = false;
+    wifiScanInProgress = false;
+
+    JSONVar resp;
+    resp["scanning"] = false;
+    resp["wifiWasOff"] = wasOff;
+    resp["networks"] = arr;
+    request->send(200, "application/json", JSON.stringify(resp));
+  });
+
+  // REST API: POST /api/wifi/save
+  server.on("/api/wifi/save", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("ssid", true)) wifi_ssid = request->getParam("ssid", true)->value();
+    if (request->hasParam("pass", true)) wifi_pass = request->getParam("pass", true)->value();
+    if (request->hasParam("keep_on", true)) wifi_keep_on_with_poe = (request->getParam("keep_on", true)->value() == "1");
+
+    preferences.begin("tally-arbiter", false);
+    preferences.putString("wifiSsid", wifi_ssid);
+    preferences.putString("wifiPass", wifi_pass);
+    preferences.putBool("wifiKeepOn", wifi_keep_on_with_poe);
+    preferences.end();
+
+    applyWifiConfig();
+
+    JSONVar res;
+    res["success"] = true;
+    res["ssid"] = wifi_ssid;
+    res["keepOnWithPoE"] = wifi_keep_on_with_poe;
+    res["message"] = (isEthernetActive() && !wifi_keep_on_with_poe)
+      ? "Credentials saved to NVS (Wi-Fi stays OFF while PoE active; ready for failover)."
+      : "Credentials saved and Wi-Fi connection initiated.";
+    request->send(200, "application/json", JSON.stringify(res));
+  });
+
+  // REST API: POST /api/wifi/forget
+  server.on("/api/wifi/forget", HTTP_POST, [](AsyncWebServerRequest *request) {
+    wifi_ssid = "";
+    wifi_pass = "";
+    preferences.begin("tally-arbiter", false);
+    preferences.putString("wifiSsid", "");
+    preferences.putString("wifiPass", "");
+    preferences.end();
+    WiFi.disconnect(true, true);
+    JSONVar res;
+    res["success"] = true;
+    request->send(200, "application/json", JSON.stringify(res));
+  });
+
+  // ==========================================
+  // rtpMIDI & Separate MTC Receiver Configuration & mDNS Discovery Page (/rtpmidi)
+  // ==========================================
+  server.on("/rtpmidi", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String rHtml = F("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                     "<title>rtpMIDI &amp; MTC mDNS Setup - Olimex ESP32-PoE2</title><style>"
+                     "body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0f172a;color:#f1f5f9;padding:16px;max-width:720px;margin:auto}"
+                     ".card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:16px}"
+                     "h1{font-size:20px;margin:0 0 6px 0;color:#38bdf8}h2{font-size:14px;color:#94a3b8;margin:0 0 12px 0;text-transform:uppercase}"
+                     "label{display:block;margin-top:10px;font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase}"
+                     "input,select{width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #475569;color:#f8fafc;padding:9px;border-radius:6px;margin-top:4px;font-size:13px}"
+                     "button{background:#0284c7;color:#fff;font-weight:600;padding:10px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px}"
+                     ".btn-scan{background:#7c3aed;width:100%}.btn-save{background:#2563eb;width:100%;margin-top:16px}"
+                     ".peer{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;margin-top:8px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}"
+                     ".grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.nav{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}"
+                     ".nav a{background:#1e293b;border:1px solid #334155;color:#cbd5e1;padding:6px 12px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600}"
+                     ".badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:700}"
+                     ".ok{background:#16a34a;color:#fff}.idle{background:#334155;color:#cbd5e1}"
+                     "</style></head><body>"
+                     "<div class='nav'><a href='/'>&larr; Dashboard</a><a href='/wifi'>Wi-Fi Config</a><a href='/rtpmidi' style='border-color:#a78bfa;color:#a78bfa;'>rtpMIDI &amp; MTC</a></div>"
+                     "<div class='card'><h1>mDNS AppleMIDI Discovery (<code>_apple-midi._udp</code>)</h1>"
+                     "<p style='font-size:12px;color:#94a3b8;'>Browse macOS Audio MIDI Setup, Windows rtpMIDI, or hardware MIDI endpoints on the LAN and assign separately to Tally Mode or MTC Timecode.</p>"
+                     "<button type='button' id='mdns-btn' class='btn-scan' onclick='discoverMidi()'>Discover _apple-midi._udp Endpoints</button>"
+                     "<div id='midi-peers' style='margin-top:10px;font-size:12px;color:#94a3b8;'></div></div>"
+                     "<form onsubmit='saveMidiCfg(event)'>"
+                     "<div class='card'><h2>1. rtpMIDI / MSC Mode Receiver &nbsp;<span class='badge ");
+    rHtml += rtpmidi_session_connected ? "ok'>Connected: " + rtpmidi_last_sender : "idle'>Listening";
+    rHtml += F("</span></h2>"
+               "<div class='grid-2'><div><label>mDNS Session Name</label><input type='text' id='rtp_sess' value='");
+    rHtml += rtpmidi_session_name;
+    rHtml += F("'></div><div><label>Broadcast _apple-midi._udp mDNS</label><select id='rtp_mdns'>"
+               "<option value='1'"); if (rtpmidi_mdns_enabled) rHtml += F(" selected"); rHtml += F(">Enabled</option>"
+               "<option value='0'"); if (!rtpmidi_mdns_enabled) rHtml += F(" selected"); rHtml += F(">Disabled</option></select></div></div>"
+               "<div class='grid-2'><div><label>Local Tally/MSC Port (Data = +1)</label><input type='number' id='rtp_port' value='");
+    rHtml += String(isMSCRTPMidi() ? msc_rtpmidi_port : rtpmidi_port);
+    rHtml += F("'></div><div><label>Remote Initiator Target Host</label><input type='text' id='rtp_peer_host' value='");
+    rHtml += rtpmidi_peer_host;
+    rHtml += F("' placeholder='Optional IP / Host'></div></div>"
+               "<label>Remote Target Control Port</label><input type='number' id='rtp_peer_port' value='");
+    rHtml += String(rtpmidi_peer_port);
+    rHtml += F("'></div>"
+               "<div class='card'><h2>2. Separate MTC Timecode Receiver &nbsp;<span class='badge ");
+    rHtml += mtc_session_connected ? "ok'>Connected: " + mtc_last_sender : "idle'>Independent Port";
+    rHtml += F("</span></h2><p style='font-size:12px;color:#cbd5e1;margin:0 0 8px 0;'>Live MTC: <strong style='color:#fbbf24;'>");
+    rHtml += mtc_timecode_str;
+    rHtml += F("</strong> (Active across ALL 13 operating modes on its own UDP port &amp; mDNS instance)</p>"
+               "<div class='grid-2'><div><label>Enable MTC Reader</label><select id='mtc_en'>"
+               "<option value='1'"); if (mtc_reader_enabled) rHtml += F(" selected"); rHtml += F(">Enabled</option>"
+               "<option value='0'"); if (!mtc_reader_enabled) rHtml += F(" selected"); rHtml += F(">Disabled</option></select></div>"
+               "<div><label>MTC mDNS Session Name</label><input type='text' id='mtc_sess' value='");
+    rHtml += mtc_session_name;
+    rHtml += F("'></div></div>"
+               "<div class='grid-2'><div><label>Local MTC Port (Default 5006, Data=5007)</label><input type='number' id='mtc_port' value='");
+    rHtml += String(mtc_rtpmidi_port);
+    rHtml += F("'></div><div><label>Broadcast MTC _apple-midi._udp mDNS</label><select id='mtc_mdns'>"
+               "<option value='1'"); if (mtc_mdns_enabled) rHtml += F(" selected"); rHtml += F(">Enabled</option>"
+               "<option value='0'"); if (!mtc_mdns_enabled) rHtml += F(" selected"); rHtml += F(">Disabled</option></select></div></div>"
+               "<div class='grid-2'><div><label>MTC Remote Peer Host</label><input type='text' id='mtc_peer_host' value='");
+    rHtml += mtc_peer_host;
+    rHtml += F("' placeholder='e.g. QLab / DAW IP'></div><div><label>MTC Remote Peer Control Port</label><input type='number' id='mtc_peer_port' value='");
+    rHtml += String(mtc_peer_port);
+    rHtml += F("'></div></div>"
+               "<button type='submit' class='btn-save'>Save &amp; Restart rtpMIDI / MTC Receivers</button>"
+               "<div id='midi-msg' style='margin-top:10px;font-size:13px;color:#34d399;'></div></div></form>"
+               "<script>"
+               "async function discoverMidi(){const l=document.getElementById('midi-peers');l.innerHTML='Querying _apple-midi._udp via mDNS...';"
+               "try{const r=await fetch('/api/rtpmidi/discover');const p=await r.json();"
+               "l.innerHTML=p.length?p.map(x=>`<div class='peer'><div><strong>${x.name||x.hostname}</strong><div style='color:#94a3b8;font-size:11px;'>${x.ip}:${x.port} (${x.hostname})</div></div>"
+               "<div style='display:flex;gap:6px;'><button type='button' onclick=\"assignPeer('tally','${x.ip}',${x.port})\">Set Mode + Invite</button>"
+               "<button type='button' style='background:#d97706;' onclick=\"assignPeer('mtc','${x.ip}',${x.port})\">Set MTC + Invite</button></div></div>`).join(''):'No _apple-midi._udp services found.';}catch(e){l.innerHTML=e.message;}}"
+               "async function assignPeer(role,ip,port){if(role==='tally'){document.getElementById('rtp_peer_host').value=ip;document.getElementById('rtp_peer_port').value=port;}else{document.getElementById('mtc_peer_host').value=ip;document.getElementById('mtc_peer_port').value=port;}"
+               "const f=new FormData();f.append('role',role);f.append('ip',ip);f.append('port',port);await fetch('/api/rtpmidi/invite',{method:'POST',body:f});document.getElementById('midi-msg').textContent='Invited '+ip+':'+port+' ('+role.toUpperCase()+')';}"
+               "async function saveMidiCfg(e){e.preventDefault();const f=new FormData();"
+               "f.append('rtp_sess',document.getElementById('rtp_sess').value);f.append('rtp_mdns',document.getElementById('rtp_mdns').value);"
+               "f.append('rtp_port',document.getElementById('rtp_port').value);f.append('rtp_peer_host',document.getElementById('rtp_peer_host').value);f.append('rtp_peer_port',document.getElementById('rtp_peer_port').value);"
+               "f.append('mtc_en',document.getElementById('mtc_en').value);f.append('mtc_sess',document.getElementById('mtc_sess').value);"
+               "f.append('mtc_mdns',document.getElementById('mtc_mdns').value);f.append('mtc_port',document.getElementById('mtc_port').value);"
+               "f.append('mtc_peer_host',document.getElementById('mtc_peer_host').value);f.append('mtc_peer_port',document.getElementById('mtc_peer_port').value);"
+               "await fetch('/api/rtpmidi/save',{method:'POST',body:f});document.getElementById('midi-msg').textContent='rtpMIDI & MTC settings saved and mDNS updated!';}"
+               "</script></body></html>");
+    request->send(200, "text/html", rHtml);
+  });
+
+  // REST API: GET /api/rtpmidi/discover (_apple-midi._udp mDNS browser)
+  server.on("/api/rtpmidi/discover", HTTP_GET, [](AsyncWebServerRequest *request) {
+    int n = MDNS.queryService("apple-midi", "udp");
+    JSONVar arr = JSON.parse("[]");
+    String myIp = getNetworkIPStr();
+    for (int i = 0; i < n; ++i) {
+      String ipStr = MDNS.address(i).toString();
+      uint16_t p = MDNS.port(i);
+      if (ipStr == myIp && (p == activeRtpMidiBoundPort || p == activeMtcBoundPort)) continue;
+      JSONVar item;
+      item["hostname"] = MDNS.hostname(i);
+      item["ip"] = ipStr;
+      item["port"] = (int)p;
+      #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 2)
+      String r = MDNS.hasTxt(i, "role") ? MDNS.txt(i, "role") : "";
+      item["name"] = MDNS.hostname(i) + (r.length() > 0 ? (" [" + r + "]") : "");
+      #else
+      item["name"] = MDNS.hostname(i);
+      #endif
+      arr[arr.length()] = item;
+    }
+    request->send(200, "application/json", JSON.stringify(arr));
+  });
+
+  // REST API: POST /api/rtpmidi/invite
+  server.on("/api/rtpmidi/invite", HTTP_POST, [](AsyncWebServerRequest *request) {
+    String role = request->hasParam("role", true) ? request->getParam("role", true)->value() : "tally";
+    String ipStr = request->hasParam("ip", true) ? request->getParam("ip", true)->value() : "";
+    int port = request->hasParam("port", true) ? request->getParam("port", true)->value().toInt() : 5004;
+
+    IPAddress targetIP;
+    if (ipStr.length() > 0 && (targetIP.fromString(ipStr) || WiFi.hostByName(ipStr.c_str(), targetIP))) {
+      if (role == "mtc") {
+        mtc_peer_host = ipStr;
+        mtc_peer_port = port;
+        preferences.begin("tally-arbiter", false);
+        preferences.putString("mtcPeerHost", mtc_peer_host);
+        preferences.putInt("mtcPeerPort", mtc_peer_port);
+        preferences.end();
+        startMidiReceivers();
+        String sess = mtc_session_name.length() > 0 ? mtc_session_name : (listenerDeviceName + "-MTC");
+        if (activeMtcBoundPort > 0) sendAppleMidiInvite(mtcCtrlUdp, targetIP, (uint16_t)port, 0x4D544331, sess);
+      } else {
+        rtpmidi_peer_host = ipStr;
+        rtpmidi_peer_port = port;
+        preferences.begin("tally-arbiter", false);
+        preferences.putString("rtpPeerHost", rtpmidi_peer_host);
+        preferences.putInt("rtpPeerPort", rtpmidi_peer_port);
+        preferences.end();
+        startMidiReceivers();
+        String sess = rtpmidi_session_name.length() > 0 ? rtpmidi_session_name : listenerDeviceName;
+        uint32_t ssrc = isMSCRTPMidi() ? 0x4D534331 : 0x4F4C4D58;
+        if (activeRtpMidiBoundPort > 0) sendAppleMidiInvite(rtpMidiCtrlUdp, targetIP, (uint16_t)port, ssrc, sess);
+      }
+    }
+    JSONVar res;
+    res["success"] = true;
+    res["role"] = role;
+    res["ip"] = ipStr;
+    res["port"] = port;
+    request->send(200, "application/json", JSON.stringify(res));
+  });
+
+  // REST API: POST /api/rtpmidi/save
+  server.on("/api/rtpmidi/save", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("rtp_sess", true)) rtpmidi_session_name = request->getParam("rtp_sess", true)->value();
+    if (request->hasParam("rtp_mdns", true)) rtpmidi_mdns_enabled = (request->getParam("rtp_mdns", true)->value() == "1");
+    if (request->hasParam("rtp_port", true)) {
+      int p = request->getParam("rtp_port", true)->value().toInt();
+      if (p > 0) {
+        if (isMSCRTPMidi()) msc_rtpmidi_port = p;
+        else rtpmidi_port = p;
+      }
+    }
+    if (request->hasParam("rtp_peer_host", true)) rtpmidi_peer_host = request->getParam("rtp_peer_host", true)->value();
+    if (request->hasParam("rtp_peer_port", true)) rtpmidi_peer_port = request->getParam("rtp_peer_port", true)->value().toInt();
+
+    if (request->hasParam("mtc_en", true)) mtc_reader_enabled = (request->getParam("mtc_en", true)->value() == "1");
+    if (request->hasParam("mtc_sess", true)) mtc_session_name = request->getParam("mtc_sess", true)->value();
+    if (request->hasParam("mtc_mdns", true)) mtc_mdns_enabled = (request->getParam("mtc_mdns", true)->value() == "1");
+    if (request->hasParam("mtc_port", true)) {
+      int p = request->getParam("mtc_port", true)->value().toInt();
+      if (p > 0) mtc_rtpmidi_port = p;
+    }
+    if (request->hasParam("mtc_peer_host", true)) mtc_peer_host = request->getParam("mtc_peer_host", true)->value();
+    if (request->hasParam("mtc_peer_port", true)) mtc_peer_port = request->getParam("mtc_peer_port", true)->value().toInt();
+
+    preferences.begin("tally-arbiter", false);
+    preferences.putInt("midiPort", rtpmidi_port);
+    preferences.putInt("mscPort", msc_rtpmidi_port);
+    preferences.putString("rtpSess", rtpmidi_session_name);
+    preferences.putBool("rtpMdns", rtpmidi_mdns_enabled);
+    preferences.putString("rtpPeerHost", rtpmidi_peer_host);
+    preferences.putInt("rtpPeerPort", rtpmidi_peer_port);
+    preferences.putBool("mtcReader", mtc_reader_enabled);
+    preferences.putInt("mtcPort", mtc_rtpmidi_port);
+    preferences.putString("mtcSess", mtc_session_name);
+    preferences.putBool("mtcMdns", mtc_mdns_enabled);
+    preferences.putString("mtcPeerHost", mtc_peer_host);
+    preferences.putInt("mtcPeerPort", mtc_peer_port);
+    preferences.end();
+
+    startMidiReceivers();
+    connectConfiguredMidiPeers();
+    renderScreen();
+
+    JSONVar res;
+    res["success"] = true;
+    request->send(200, "application/json", JSON.stringify(res));
   });
 
   // REST API: GET /api/env
@@ -2750,25 +3655,61 @@ void setupWebServer() {
     request->send(200, "application/json", json);
   });
 
-  // Embedded HTML User Manual
+  // Embedded HTML User Manual (Full Reference)
   server.on("/manual", HTTP_GET, [](AsyncWebServerRequest *request) {
     String mHtml = F("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                     "<title>Olimex ESP32-PoE2 Tally &amp; Cue User Manual</title><style>"
+                     "<title>Universal Cue &amp; Tally Controller - User Manual</title><style>"
                      "body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:#0b1120;color:#e2e8f0;padding:24px;line-height:1.6;max-width:960px;margin:auto}"
-                     "h1{color:#38bdf8;font-size:24px;border-bottom:1px solid #1e293b;padding-bottom:12px}"
-                     "h2{color:#f8fafc;font-size:18px;margin-top:24px;border-bottom:1px solid #334155;padding-bottom:6px}"
-                     ".card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:18px;margin-bottom:16px}"
+                     "h1{color:#38bdf8;font-size:26px;border-bottom:1px solid #1e293b;padding-bottom:12px;margin-bottom:8px}"
+                     "h2{color:#f8fafc;font-size:18px;margin-top:28px;padding-bottom:6px;border-bottom:1px solid #334155}"
+                     "h3{color:#7dd3fc;font-size:15px;margin-top:16px}"
+                     ".card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:18px;margin-bottom:18px}"
                      "code{background:#0f172a;border:1px solid #334155;color:#38bdf8;padding:2px 6px;border-radius:4px;font-size:12px;font-family:monospace}"
+                     "pre{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:12px;overflow-x:auto;color:#a5f3fc;font-size:12px;font-family:monospace}"
+                     "a{color:#38bdf8;text-decoration:none}a:hover{text-decoration:underline}"
                      "</style></head><body>"
                      "<h1>Olimex ESP32-PoE2 + Waveshare 1.69&quot; Touch LCD Manual</h1>"
-                     "<div class='card'><h2>CST816T Touch &amp; Battery Readout</h2>"
-                     "<ul><li><strong>Single Tap:</strong> Button click equivalent (TSL Return, ETC ACK, Promptside ACK, OSC Cue Light ACK, NMOS toggle, MIDI button message).</li>"
-                     "<li><strong>Double Tap (&lt;350ms):</strong> Toggles Screen 0 (Main Tally/Cue) and Screen 1 (Diagnostics Page with matching tally background).</li>"
-                     "<li><strong>Long Press (&gt;1.2s):</strong> Cycles backlight brightness (25%, 50%, 75%, 100%).</li>"
-                     "<li><strong>Battery ADC (GPIO 35):</strong> Monitors LiPo voltage (2:1 divider), charge %, and MCP73831 status on both screens and <code>/api/battery</code>.</li></ul></div>"
-                     "<div class='card'><h2>13 Supported Operating Modes</h2>"
-                     "<p>TP, Presenter, TP_P2P (250ms heartbeat), Presenter_P2P (250ms heartbeat), ETC_CueSystem, NMOS_IS07, Promptside, MSC_RTP_MIDI, RTP_MIDI, OSC, TSL_31, TSL_50, OSC_CueLight.</p>"
-                     "</div><p><a href='/' style='color:#38bdf8;'>&larr; Return to Dashboard</a></p></body></html>");
+                     "<p style='color:#94a3b8;'>Universal Broadcast Tally &amp; Theatrical Cue System Reference</p>"
+                     "<div class='card'><h3>Table of Contents</h3><ol style='margin:0;padding-left:20px;font-size:14px;'>"
+                     "<li><a href='#touch'>CST816T Touch Gestures &amp; GPIO 35 LiPo Battery Readout</a></li>"
+                     "<li><a href='#modes'>14 Supported Operating Modes</a></li>"
+                     "<li><a href='#p2p'>Standalone P2P Heartbeat &amp; 4-Missed Fault Alarm (0.25s)</a></li>"
+                     "<li><a href='#midi-msc'>rtpMIDI mDNS, MSC (RP-002), Return Action &amp; Separate MTC</a></li>"
+                     "<li><a href='#promptside'>Promptside Theatrical System (promptside.co)</a></li>"
+                     "<li><a href='#env'>External I2C ENV Sensor &amp; Power Eco APIs</a></li>"
+                     "<li><a href='#net'>Wi-Fi Configuration, AP Scanner &amp; PoE Precedence</a></li>"
+                     "</ol></div>"
+                     "<h2 id='touch'>1. CST816T Touch Gestures &amp; LiPo Battery</h2><div class='card'>"
+                     "<ul><li><strong>Single Tap (240ms window):</strong> Exact physical button equivalent — sends TSL 3.1 Program/Preview return, ETC ACK, Promptside ACK, OSC Cue Light ACK, NMOS toggle, vMix Preview/Active trigger, or MIDI button message.</li>"
+                     "<li><strong>Double Tap:</strong> Toggles Screen 0 (Main Tally/Cue) and Screen 1 (Diagnostics Page with matching tally background).</li>"
+                     "<li><strong>Long Press (&gt;1.2s):</strong> Cycles display backlight brightness (25%, 50%, 75%, 100%). Hold &gt;7s for emergency reboot.</li>"
+                     "<li><strong>Battery ADC (GPIO 35):</strong> Reads LiPo voltage via 2:1 divider, maps 0-100%, and detects PoE Charging / Full / Discharging / Low Alert (<code>GET /api/battery</code>).</li></ul></div>"
+                     "<h2 id='modes'>2. 14 Supported Operating Modes</h2><div class='card'>"
+                     "<p><strong>1. TP (TA):</strong> Tally Arbiter Socket.IO + TSL 3.1 Program (0x32) return.<br>"
+                     "<strong>2. Presenter (TA):</strong> Tally Arbiter + TSL 3.1 Preview (0x31) return.<br>"
+                     "<strong>3. TP_P2P / 4. Presenter_P2P:</strong> Zero-conf LAN P2P master/slave with 250ms heartbeat.<br>"
+                     "<strong>5. ETC CueSystem:</strong> Flashing red STANDBY &rarr; Single Tap <code>CS,&lt;ch&gt;,ACK</code> &rarr; GO green.<br>"
+                     "<strong>6. NMOS IS-07:</strong> SMPTE ST 2110 event/tally with DNS-SD discovery.<br>"
+                     "<strong>7. Promptside:</strong> Theatrical wing cue light on UDP 8000 (<code>/standby</code>, <code>/go</code>, <code>/off</code>, <code>/text</code>).<br>"
+                     "<strong>8. MSC_RTP_MIDI:</strong> MIDI Show Control RP-002 (GO/STOP/STANDBY+ &amp; cue numbers).<br>"
+                     "<strong>9. RTP_MIDI:</strong> AppleMIDI 6-color outstation with priority &amp; Note/CC/PC button feedback.<br>"
+                     "<strong>10. OSC:</strong> Open Sound Control colors + scrolling text ticker.<br>"
+                     "<strong>11. TSL 3.1 / 12. TSL 5.0:</strong> Dedicated UDP/TCP UMD listeners.<br>"
+                     "<strong>13. OSC Cue Light:</strong> RSMCK iOS protocol (UDP 53000).<br>"
+                     "<strong>14. vMix Tally:</strong> Connects via TCP port 8099 (<code>SUBSCRIBE TALLY</code>) for Program (1 Red) &amp; Preview (2 Green) with optional <code>PreviewInput</code> / <code>ActiveInput</code> tap trigger.</p></div>"
+                     "<h2 id='p2p'>3. Standalone P2P 250ms Heartbeat &amp; Fault Alarm</h2><div class='card'>"
+                     "<p>Exchanges <code>CXPING</code>/<code>CXPONG</code> every 250ms. Missing &gt;4 consecutive packets (&gt;1000ms) flashes Yellow/Black <strong>DISCONNECTED / PEER LOST</strong> until link recovers.</p></div>"
+                     "<h2 id='midi-msc'>4. rtpMIDI mDNS &amp; Separate MTC Receiver</h2><div class='card'>"
+                     "<p>Visit <a href='/rtpmidi'>/rtpmidi</a> to discover <code>_apple-midi._udp</code> devices and configure two completely independent AppleMIDI sessions:<br>"
+                     "1) <strong>Mode Receiver (Default UDP 5004/5005):</strong> Drives RTP_MIDI / MSC cues and sends MIDI button feedback.<br>"
+                     "2) <strong>Separate MTC Receiver (Default UDP 5006/5007):</strong> Active globally across all 14 modes, parsing <code>0xF1</code> Quarter-Frame and Full-Frame SysEx into <code>HH:MM:SS:FF</code>.</p></div>"
+                     "<h2 id='promptside'>5. Promptside Theatrical System</h2><div class='card'>"
+                     "<p>Listens for <code>/promptside/channel/[ch]/standby|go|off|text</code> and sends <code>/promptside/channel/[ch]/ack 1</code> on Single Tap.</p></div>"
+                     "<h2 id='env'>6. I2C ENV Sensor &amp; Power Eco APIs</h2><div class='card'>"
+                     "<p>Wire optional SHT30 (0x44) + BMP280 (0x76) to shared Touch I2C (SDA 33, SCL 32). Query telemetry at <code>GET /api/env</code> and thermal/CPU stats at <code>GET /api/power</code>.</p></div>"
+                     "<h2 id='net'>7. Wi-Fi Config &amp; AP Scanner</h2><div class='card'>"
+                     "<p>Visit <a href='/wifi'>/wifi</a> to scan nearby 2.4 GHz APs even when PoE Ethernet has turned the Wi-Fi radio off. Scanning temporarily wakes STA mode and restores PoE RF-off afterwards.</p></div>"
+                     "<p style='text-align:center;margin-top:24px;'><a href='/' style='background:#2563eb;color:#fff;padding:10px 20px;border-radius:6px;font-weight:600;'>Return to Web Dashboard</a></p></body></html>");
     request->send(200, "text/html", mHtml);
   });
 
@@ -2876,6 +3817,18 @@ void setupWebServer() {
     if (request->hasParam("osccue_station", true)) osccue_station_id = request->getParam("osccue_station", true)->value();
     if (request->hasParam("osccue_banner", true)) osccue_banner = request->getParam("osccue_banner", true)->value();
 
+    if (request->hasParam("vmix_host", true)) vmix_host = request->getParam("vmix_host", true)->value();
+    if (request->hasParam("vmix_port", true)) {
+      int vp = request->getParam("vmix_port", true)->value().toInt();
+      vmix_port = vp > 0 ? vp : 8099;
+    }
+    if (request->hasParam("vmix_input", true)) {
+      int vi = request->getParam("vmix_input", true)->value().toInt();
+      vmix_input = vi >= 1 ? vi : 1;
+    }
+    if (request->hasParam("vmix_label", true)) vmix_label = request->getParam("vmix_label", true)->value();
+    if (request->hasParam("vmix_btn", true)) vmix_btn_action = request->getParam("vmix_btn", true)->value().toInt();
+
     if (request->hasParam("midi_port", true)) rtpmidi_port = request->getParam("midi_port", true)->value().toInt();
     if (request->hasParam("midi_chan", true)) rtpmidi_channel = request->getParam("midi_chan", true)->value().toInt();
     if (request->hasParam("midi_trig", true)) rtpmidi_trigger_type = request->getParam("midi_trig", true)->value().toInt();
@@ -2945,6 +3898,11 @@ void setupWebServer() {
     preferences.putInt("oscCuePort", osccue_port);
     preferences.putString("oscCueStation", osccue_station_id);
     preferences.putString("oscCueBanner", osccue_banner);
+    preferences.putString("vmixHost", vmix_host);
+    preferences.putInt("vmixPort", vmix_port);
+    preferences.putInt("vmixInput", vmix_input);
+    preferences.putString("vmixLbl", vmix_label);
+    preferences.putInt("vmixBtn", vmix_btn_action);
     preferences.putInt("midiPort", rtpmidi_port);
     preferences.putInt("midiChan", rtpmidi_channel);
     preferences.putInt("midiTrig", rtpmidi_trigger_type);
@@ -2968,7 +3926,7 @@ void setupWebServer() {
     preferences.putInt("dimTimeout", screen_dim_timeout_sec);
     preferences.end();
 
-    applyNetworkIPConfig();
+    applyNetworkIPConfig(false);
     applyTimezoneConfig();
     applyPowerManagementConfig();
 
@@ -2983,10 +3941,14 @@ void setupWebServer() {
     if (networkConnected) {
       udp.stop();
       udp.begin(getActiveListenPort());
+      startMidiReceivers();
+      connectConfiguredMidiPeers();
       if (isNMOSIS07() && nmos_auto_discover) discoverNMOSRegistrationServer();
+      if (isVmix()) vmixReconnectRequested = true;
     }
 
     MDNS.addServiceTxt("cuelx-tally", "udp", "mode", operatingMode.c_str());
+    MDNS.addServiceTxt("cuelx-tally", "udp", "role", getActiveRoleTag());
     MDNS.addServiceTxt("cuelx-tally", "udp", "group", pairingGroup.c_str());
     MDNS.addServiceTxt("cuelx-tally", "udp", "name", listenerDeviceName.c_str());
 
@@ -3050,6 +4012,11 @@ void setup() {
   if (preferences.isKey("oscCuePort"))                      osccue_port = preferences.getInt("oscCuePort", 53000);
   if (preferences.getString("oscCueStation").length() > 0)  osccue_station_id = preferences.getString("oscCueStation");
   if (preferences.getString("oscCueBanner").length() > 0)   osccue_banner = preferences.getString("oscCueBanner");
+  if (preferences.getString("vmixHost").length() > 0)       vmix_host = preferences.getString("vmixHost");
+  if (preferences.isKey("vmixPort"))                        vmix_port = preferences.getInt("vmixPort", 8099);
+  if (preferences.isKey("vmixInput"))                       vmix_input = preferences.getInt("vmixInput", 1);
+  if (preferences.getString("vmixLbl").length() > 0)        vmix_label = preferences.getString("vmixLbl");
+  if (preferences.isKey("vmixBtn"))                         vmix_btn_action = preferences.getInt("vmixBtn", 0);
   if (preferences.isKey("midiPort"))                        rtpmidi_port = preferences.getInt("midiPort", 5004);
   if (preferences.isKey("midiChan"))                        rtpmidi_channel = preferences.getInt("midiChan", 1);
   if (preferences.isKey("midiTrig"))                        rtpmidi_trigger_type = preferences.getInt("midiTrig", 0);
@@ -3086,7 +4053,21 @@ void setup() {
   if (preferences.isKey("mBtnRel"))                         midi_btn_val_release = preferences.getInt("mBtnRel", 0);
   if (preferences.isKey("cpuFreq"))                         cpu_freq_mhz = preferences.getInt("cpuFreq", 80);
   if (preferences.isKey("dimTimeout"))                      screen_dim_timeout_sec = preferences.getInt("dimTimeout", 60);
+  if (preferences.getString("wifiSsid").length() > 0)       wifi_ssid = preferences.getString("wifiSsid");
+  if (preferences.getString("wifiPass").length() > 0)       wifi_pass = preferences.getString("wifiPass");
+  if (preferences.isKey("wifiKeepOn"))                      wifi_keep_on_with_poe = preferences.getBool("wifiKeepOn", false);
+  if (preferences.getString("rtpSess").length() > 0)        rtpmidi_session_name = preferences.getString("rtpSess");
+  if (preferences.isKey("rtpMdns"))                         rtpmidi_mdns_enabled = preferences.getBool("rtpMdns", true);
+  if (preferences.getString("rtpPeerHost").length() > 0)    rtpmidi_peer_host = preferences.getString("rtpPeerHost");
+  if (preferences.isKey("rtpPeerPort"))                     rtpmidi_peer_port = preferences.getInt("rtpPeerPort", 5004);
+  if (preferences.isKey("mtcPort"))                         mtc_rtpmidi_port = preferences.getInt("mtcPort", 5006);
+  if (preferences.getString("mtcSess").length() > 0)        mtc_session_name = preferences.getString("mtcSess");
+  if (preferences.isKey("mtcMdns"))                         mtc_mdns_enabled = preferences.getBool("mtcMdns", true);
+  if (preferences.getString("mtcPeerHost").length() > 0)    mtc_peer_host = preferences.getString("mtcPeerHost");
+  if (preferences.isKey("mtcPeerPort"))                     mtc_peer_port = preferences.getInt("mtcPeerPort", 5004);
   preferences.end();
+
+  taStateMutex = xSemaphoreCreateMutex();
 
   // Initialize Waveshare 1.69" LCD & allocate 134.4 KB Double Buffer BEFORE network stacks
   lcd.init();
@@ -3119,6 +4100,8 @@ void setup() {
   char macSuffix[10];
   snprintf(macSuffix, sizeof(macSuffix), "%02X%02X%02X", mac[3], mac[4], mac[5]);
   if (!listenerDeviceName.endsWith(macSuffix)) listenerDeviceName += macSuffix;
+  if (rtpmidi_session_name.length() == 0) rtpmidi_session_name = listenerDeviceName;
+  if (mtc_session_name.length() == 0) mtc_session_name = String("Olimex-MTC-") + String(macSuffix);
 
   if (operatingMode == "TSL_31" && tsl31_transport == "TCP") setupTSLTcpServer(tsl31_port);
   else if (operatingMode == "TSL_50" && tsl50_transport == "TCP") setupTSLTcpServer(tsl50_port);
@@ -3138,6 +4121,8 @@ void setup() {
         networkConnected = true;
         battery.isPoE = true;
         udp.begin(getActiveListenPort());
+        startMidiReceivers();
+        connectConfiguredMidiPeers();
         if (isNMOSIS07() && nmos_auto_discover) discoverNMOSRegistrationServer();
         if (usesTallyArbiter()) connectToServer();
         renderScreen();
@@ -3172,6 +4157,8 @@ void setup() {
     if (current == Mycila::ESPConnect::State::NETWORK_CONNECTED) {
       networkConnected = true;
       udp.begin(getActiveListenPort());
+      startMidiReceivers();
+      connectConfiguredMidiPeers();
       if (isNMOSIS07() && nmos_auto_discover) discoverNMOSRegistrationServer();
       if (usesTallyArbiter()) connectToServer();
       renderScreen();
@@ -3186,7 +4173,12 @@ void setup() {
 
   espConnect.setBlocking(false);
   espConnect.begin(listenerDeviceName.c_str(), listenerDeviceName.c_str());
+  if (wifi_ssid.length() > 0 && (!isEthernetActive() || wifi_keep_on_with_poe)) {
+    applyWifiConfig();
+  }
 
+  // Disable ArduinoOTA's internal mDNS responder so it doesn't collide with ESPmDNS on Core 0
+  ArduinoOTA.setMdnsEnabled(false);
   ArduinoOTA.setHostname(listenerDeviceName.c_str());
   ArduinoOTA.setPassword("tallyarbiter");
   ArduinoOTA.begin();
@@ -3197,14 +4189,16 @@ void setup() {
     uint16_t mDnsPort = getActiveListenPort();
     MDNS.addService("cuelx-tally", "udp", mDnsPort);
     MDNS.addServiceTxt("cuelx-tally", "udp", "mode", operatingMode.c_str());
+    MDNS.addServiceTxt("cuelx-tally", "udp", "role", getActiveRoleTag());
     MDNS.addServiceTxt("cuelx-tally", "udp", "group", pairingGroup.c_str());
     MDNS.addServiceTxt("cuelx-tally", "udp", "name", listenerDeviceName.c_str());
+    registerAppleMidiMDNS();
   }
 
   last_user_or_tally_act = millis();
   renderScreen();
 
-  // Start Socket.IO background task pinned to Core 0 (PRO_CPU)
+  // Start Socket.IO + vMix TCP background task pinned to Core 0 (PRO_CPU)
   xTaskCreatePinnedToCore(socketTask, "socketTask", 8192, NULL, 1, &socketTaskHandle, 0);
 }
 
@@ -3213,7 +4207,9 @@ void setup() {
 // ==========================================
 void loop() {
   espConnect.loop();
-  ArduinoOTA.handle();
+  if (networkConnected) {
+    ArduinoOTA.handle();
+  }
   processTouchEvents();
 
   // Ethernet Precedence check every 500ms
@@ -3227,7 +4223,8 @@ void loop() {
   if (screen_dim_timeout_sec > 0) {
     bool isLiveOnAir = (actualType == "\"program\"" || actualType == "\"preview\"" ||
                         cuesystem_ack_active || promptside_state == "go" || msc_state == "go" ||
-                        midi_active_red || osc_active_red || nmos_program_active || osccue_state == "go");
+                        midi_active_red || osc_active_red || nmos_program_active || osccue_state == "go" ||
+                        (isVmix() && vmix_tally_val > 0));
     if (isLiveOnAir) {
       last_user_or_tally_act = millis();
       if (screen_dimmed) wakeDisplayFromDim();
@@ -3239,6 +4236,8 @@ void loop() {
   }
 
   processIncomingTSL();
+  processTallyMidiReceivers();
+  processMtcMidiReceivers();
   handleP2PHeartbeatCheck();
   readEnvSensor();
 
@@ -3306,16 +4305,171 @@ void loop() {
     renderClockTick();
   }
 
-  vTaskDelay(pdMS_TO_TICKS((isFlashing || isTicker) ? 1 : 2));
+  vTaskDelay(pdMS_TO_TICKS((isFlashing || isTicker || touch.isPressed || touch.tapCount > 0) ? 1 : 2));
 }
 
 // ==========================================
-// Tally Arbiter Socket.IO Client Logic (Core 0)
+// Tally Arbiter & vMix TCP Client Logic (Core 0)
 // ==========================================
 void socketTask(void *pvParameters) {
+  logger("[Task] Socket.IO + vMix TCP background task running on Core 0", "info");
   for (;;) {
-    if (networkConnected && usesTallyArbiter()) socket.loop();
+    if (taDisconnectRequested) {
+      taDisconnectRequested = false;
+      if (socket.isConnected()) {
+        socket.disconnect();
+        logger("[TallyArbiter] Disconnected from server", "info");
+      }
+    }
+
+    if (networkConnected && usesTallyArbiter()) {
+      if (taConnectRequested) {
+        taConnectRequested = false;
+        if (!socket.isConnected()) {
+          logger(String("[TallyArbiter] Connecting to ") + tallyarbiter_host + ":" + tallyarbiter_port, "info");
+          socket.onEvent(socket_event);
+          socket.setReconnectInterval(5000);
+          socket.begin(tallyarbiter_host, atol(tallyarbiter_port));
+        }
+      }
+      socket.loop();
+    }
+    taSocketConnected = socket.isConnected();
+
+    // vMix TCP API client also runs strictly on Core 0 so connect timeouts never stall Core 1 Touch/LCD
+    handleVmixSocketLoop();
+
     vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
+void handleVmixSocketLoop() {
+  static unsigned long lastVmixReconnectAttempt = 0;
+  static unsigned long lastVmixPollTime = 0;
+
+  if (!networkConnected || !isVmix()) {
+    if (vmixClient.connected()) {
+      vmixClient.stop();
+    }
+    if (vmixConnected) {
+      vmixConnected = false;
+      vmixRxBuffer = "";
+      tallyStateChanged = true;
+    }
+    return;
+  }
+
+  if (vmixReconnectRequested) {
+    vmixReconnectRequested = false;
+    if (vmixClient.connected()) {
+      vmixClient.stop();
+    }
+    vmixConnected = false;
+    vmixRxBuffer = "";
+    lastVmixReconnectAttempt = 0;
+    tallyStateChanged = true;
+  }
+
+  if (!vmixClient.connected()) {
+    if (vmixConnected) {
+      vmixConnected = false;
+      vmixRxBuffer = "";
+      logger("[vMix] TCP connection closed; reconnecting...", "info");
+      tallyStateChanged = true;
+    }
+    unsigned long now = millis();
+    if (lastVmixReconnectAttempt == 0 || (now - lastVmixReconnectAttempt >= 3000)) {
+      lastVmixReconnectAttempt = now;
+      String targetHost = vmix_host;
+      int targetPort = vmix_port > 0 ? vmix_port : 8099;
+      if (targetHost.length() > 0) {
+        IPAddress ip;
+        bool ok = false;
+        if (ip.fromString(targetHost)) {
+          ok = vmixClient.connect(ip, targetPort, 1500);
+        } else {
+          ok = vmixClient.connect(targetHost.c_str(), targetPort, 1500);
+        }
+        if (ok) {
+          vmixClient.setNoDelay(true);
+          vmixClient.print("SUBSCRIBE TALLY\r\n");
+          vmixConnected = true;
+          vmixRxBuffer = "";
+          lastVmixPollTime = millis();
+          logger(String("[vMix] Connected to ") + targetHost + ":" + String(targetPort) + " (Subscribed TALLY)", "info");
+          tallyStateChanged = true;
+        }
+      }
+    }
+    return;
+  }
+
+  // Dispatch queued screen touch action to vMix
+  if (vmixButtonActionRequested) {
+    vmixButtonActionRequested = false;
+    if (vmix_btn_action == 1) {
+      vmixClient.print(String("FUNCTION PreviewInput Input=") + String(vmix_input) + "\r\n");
+      logger(String("[vMix] Sent FUNCTION PreviewInput Input=") + String(vmix_input), "info");
+    } else if (vmix_btn_action == 2) {
+      vmixClient.print(String("FUNCTION ActiveInput Input=") + String(vmix_input) + "\r\n");
+      logger(String("[vMix] Sent FUNCTION ActiveInput Input=") + String(vmix_input), "info");
+    }
+  }
+
+  // Periodic 5s TALLY poll detects half-open TCP drops promptly
+  if (millis() - lastVmixPollTime >= 5000) {
+    lastVmixPollTime = millis();
+    if (vmixClient.print("TALLY\r\n") == 0) {
+      vmixClient.stop();
+      vmixConnected = false;
+      tallyStateChanged = true;
+      return;
+    }
+  }
+
+  // Parse incoming vMix TCP API lines (e.g. "TALLY OK 012000...")
+  while (vmixClient.available() > 0) {
+    char c = (char)vmixClient.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      String line = vmixRxBuffer;
+      vmixRxBuffer = "";
+      line.trim();
+      if (line.startsWith("TALLY OK ")) {
+        String states = line.substring(9);
+        int idx = vmix_input - 1;
+        int nextState = 0;
+        if (idx >= 0 && idx < (int)states.length()) {
+          char sc = states.charAt(idx);
+          if (sc == '1') nextState = 1;      // Program (Red)
+          else if (sc == '2') nextState = 2; // Preview (Green)
+          else nextState = 0;                // Off (Black)
+        }
+        bool changed = false;
+        if (taStateMutex != NULL && xSemaphoreTake(taStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          if (vmix_tally_val != nextState) {
+            vmix_tally_val = nextState;
+            changed = true;
+          }
+          actualType = (nextState == 1) ? "\"program\"" : ((nextState == 2) ? "\"preview\"" : "");
+          actualColor = (nextState == 1) ? "#FF0000" : ((nextState == 2) ? "#00FF00" : "");
+          xSemaphoreGive(taStateMutex);
+        } else {
+          if (vmix_tally_val != nextState) {
+            vmix_tally_val = nextState;
+            changed = true;
+          }
+          actualType = (nextState == 1) ? "\"program\"" : ((nextState == 2) ? "\"preview\"" : "");
+          actualColor = (nextState == 1) ? "#FF0000" : ((nextState == 2) ? "#00FF00" : "");
+        }
+        if (changed) {
+          logger(String("[vMix] Input ") + String(vmix_input) + " -> " + (nextState == 1 ? "PROGRAM (Red)" : (nextState == 2 ? "PREVIEW (Green)" : "OFF")), "info");
+          tallyStateChanged = true;
+        }
+      }
+    } else if (vmixRxBuffer.length() < 512) {
+      vmixRxBuffer += c;
+    }
   }
 }
 
@@ -3325,14 +4479,17 @@ void ws_emit(String event, const char *payload) {
 }
 
 void connectToServer() {
-  if (!networkConnected) return;
-  socket.onEvent(socket_event);
-  socket.setReconnectInterval(5000);
-  socket.begin(tallyarbiter_host, atol(tallyarbiter_port));
+  if (!networkConnected) {
+    logger("[TallyArbiter] Network not connected; deferring connectToServer()", "info");
+    return;
+  }
+  taDisconnectRequested = false;
+  taConnectRequested = true;
 }
 
 void disconnectFromServer() {
-  if (socket.isConnected()) socket.disconnect();
+  taConnectRequested = false;
+  taDisconnectRequested = true;
 }
 
 void socket_event(socketIOmessageType_t type, uint8_t *payload, size_t length) {
@@ -3350,16 +4507,22 @@ void socket_event(socketIOmessageType_t type, uint8_t *payload, size_t length) {
       if (eventType == "flash") socket_Flash();
       if (eventType == "messaging") socket_Messaging(eventContent);
       if (eventType == "deviceId") {
+        if (taStateMutex != NULL) xSemaphoreTake(taStateMutex, portMAX_DELAY);
         DeviceId = eventContent.substring(1, eventContent.length() - 1);
+        if (taStateMutex != NULL) xSemaphoreGive(taStateMutex);
         SetDeviceName();
         showDeviceInfo();
       }
       if (eventType == "devices") {
+        if (taStateMutex != NULL) xSemaphoreTake(taStateMutex, portMAX_DELAY);
         Devices = JSON.parse(eventContent);
+        if (taStateMutex != NULL) xSemaphoreGive(taStateMutex);
         SetDeviceName();
       }
       if (eventType == "device_states") {
+        if (taStateMutex != NULL) xSemaphoreTake(taStateMutex, portMAX_DELAY);
         DeviceStates = JSON.parse(eventContent);
+        if (taStateMutex != NULL) xSemaphoreGive(taStateMutex);
         processTallyData();
       }
       break;
@@ -3368,7 +4531,12 @@ void socket_event(socketIOmessageType_t type, uint8_t *payload, size_t length) {
 }
 
 void socket_Connected(const char *payload, size_t length) {
-  String deviceObj = "{\"deviceId\": \"" + DeviceId + "\", \"listenerType\": \"" + listenerDeviceName + "\", \"canBeReassigned\": true, \"canBeFlashed\": true, \"supportsChat\": true }";
+  String devIdCopy = DeviceId;
+  if (taStateMutex != NULL && xSemaphoreTake(taStateMutex, pdMS_TO_TICKS(15)) == pdTRUE) {
+    devIdCopy = DeviceId;
+    xSemaphoreGive(taStateMutex);
+  }
+  String deviceObj = "{\"deviceId\": \"" + devIdCopy + "\", \"listenerType\": \"" + listenerDeviceName + "\", \"canBeReassigned\": true, \"canBeFlashed\": true, \"supportsChat\": true }";
   ws_emit("listenerclient_connect", deviceObj.c_str());
   tallyStateChanged = true;
 }
@@ -3385,7 +4553,11 @@ void socket_Reassign(String payload) {
   String reassignObj = "{\"oldDeviceId\": \"" + oldDeviceId + "\", \"newDeviceId\": \"" + newDeviceId + "\"}";
   ws_emit("listener_reassign_object", reassignObj.c_str());
   ws_emit("devices");
+
+  if (taStateMutex != NULL) xSemaphoreTake(taStateMutex, portMAX_DELAY);
   DeviceId = newDeviceId;
+  if (taStateMutex != NULL) xSemaphoreGive(taStateMutex);
+
   preferences.begin("tally-arbiter", false);
   preferences.putString("deviceid", newDeviceId);
   preferences.end();
@@ -3399,11 +4571,14 @@ void socket_Messaging(String payload) {
   int messageQuoteIndex = payload.lastIndexOf(',');
   String message = payload.substring(messageQuoteIndex + 1);
   message.replace("\"", "");
+  if (taStateMutex != NULL) xSemaphoreTake(taStateMutex, portMAX_DELAY);
   LastMessage = messageType + ": " + message;
+  if (taStateMutex != NULL) xSemaphoreGive(taStateMutex);
   evaluateMode();
 }
 
 void processTallyData() {
+  if (taStateMutex != NULL) xSemaphoreTake(taStateMutex, portMAX_DELAY);
   bool typeChanged = false;
   bool hasProgram = false;
   bool hasPreview = false;
@@ -3446,6 +4621,7 @@ void processTallyData() {
     if (isTP()) ch1state = hasProgram;
     else if (isPresenter()) ch1state = hasPreview;
   }
+  if (taStateMutex != NULL) xSemaphoreGive(taStateMutex);
 
   evaluateMode();
 }
@@ -3472,6 +4648,7 @@ int getBusPriorityById(String busId) {
 }
 
 void SetDeviceName() {
+  if (taStateMutex != NULL) xSemaphoreTake(taStateMutex, portMAX_DELAY);
   for (int i = 0; i < Devices.length(); i++) {
     if (JSON.stringify(Devices[i]["id"]) == "\"" + DeviceId + "\"") {
       String strDevice = JSON.stringify(Devices[i]["name"]);
@@ -3479,8 +4656,11 @@ void SetDeviceName() {
       break;
     }
   }
+  String devNameCopy = DeviceName;
+  if (taStateMutex != NULL) xSemaphoreGive(taStateMutex);
+
   preferences.begin("tally-arbiter", false);
-  preferences.putString("devicename", DeviceName);
+  preferences.putString("devicename", devNameCopy);
   preferences.end();
   evaluateMode();
 }
