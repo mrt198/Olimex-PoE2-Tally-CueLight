@@ -26,7 +26,8 @@ import {
   Touchpad,
   Hand,
   CheckCircle2,
-  AlertTriangle
+  AlertTriangle,
+  Thermometer
 } from 'lucide-react';
 
 export interface SimulatorState {
@@ -723,6 +724,18 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                         </div>
                       </div>
 
+                      {/* Mode Top Banners (Promptside Wing / OSC Cue Light) */}
+                      {state.operatingMode === 'Promptside' && state.promptsideWingLabel && (
+                        <div className="mt-1 px-2 py-0.5 rounded bg-cyan-950/90 border border-cyan-600/70 text-cyan-200 text-[8.5px] font-bold uppercase tracking-wider text-center truncate">
+                          {state.promptsideWingLabel} &bull; CH {state.promptsideChannel}
+                        </div>
+                      )}
+                      {state.operatingMode === 'OSC_CueLight' && state.oscCueBanner && (
+                        <div className="mt-1 px-2 py-0.5 rounded bg-amber-950/90 border border-amber-600/70 text-amber-200 text-[8.5px] font-bold uppercase tracking-wider text-center truncate">
+                          {state.oscCueBanner}
+                        </div>
+                      )}
+
                       {/* Main Device / Station / Cue Text Center */}
                       <div className="text-center py-1 my-auto w-full overflow-hidden">
                         {(state.operatingMode === 'TSL_31' || state.operatingMode === 'TSL_50') ? (
@@ -750,6 +763,20 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                         <div className="inline-block mt-1 px-3 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border border-current/40 bg-current/15 shadow-sm">
                           {getStatusLabel()}
                         </div>
+
+                        {/* Presenter Cue Alert for TP / TP_P2P */}
+                        {(state.operatingMode === 'TP' || state.operatingMode === 'TP_P2P') && state.presenterCueActive && !state.p2pDisconnected && (
+                          <div className="mt-1 text-[8.5px] font-bold uppercase tracking-wider bg-emerald-950 text-emerald-300 border border-emerald-500 rounded px-1.5 py-0.5 animate-pulse">
+                            ★ PRESENTER CUE ACTIVE ★
+                          </div>
+                        )}
+
+                        {/* P2P Disconnect Fault Banner */}
+                        {(state.operatingMode === 'TP_P2P' || state.operatingMode === 'Presenter_P2P') && state.p2pDisconnected && (
+                          <div className="mt-1 text-[8px] font-bold uppercase tracking-wider bg-black text-yellow-300 border border-yellow-500 rounded px-1.5 py-0.5 animate-pulse">
+                            &gt;&gt;&gt; PEER LOST - SEARCHING &lt;&lt;&lt;
+                          </div>
+                        )}
 
                         {/* Mode-Specific Status Chips */}
                         {state.operatingMode === 'ETC_CueSystem' && state.cueAckActive && (
@@ -854,7 +881,12 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                           <div>Mode: <span className="font-bold underline">{state.operatingMode}</span></div>
                           <div>Touch: <span className="font-bold text-cyan-300">CST816T (I2C 0x15)</span></div>
                           <div>Gestures: <span className="font-bold">1-Tap=Btn | 2-Tap=Diag</span></div>
-                          <div>Display: <span className="font-bold">ST7789V2 240×280 (134KB DMA)</span></div>
+                          <div>CPU: <span className="font-bold">{state.cpuFrequency} MHz</span> | Rot: <span className="font-bold">{state.imuRotation}&deg;</span></div>
+                          {state.envSensorEnabled && (
+                            <div className="text-emerald-300 font-bold">
+                              ENV: {state.envTemperature.toFixed(1)}C | {state.envHumidity.toFixed(0)}% | {state.envPressure.toFixed(0)}hPa
+                            </div>
+                          )}
 
                           {state.operatingMode === 'Promptside' ? (
                             <div>Promptside: <span>Ch {state.promptsideChannel} ({state.promptsideState})</span></div>
@@ -1403,6 +1435,587 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
               <div className="text-neutral-400 text-[10.5px] mt-0.5">{lastTslPacket.decoded}</div>
             </div>
           )}
+        </div>
+
+        {/* Mode-Specific Live Triggers & Protocol Controls */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-xl space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-neutral-200 uppercase tracking-wider flex items-center gap-2">
+              <Sliders className="w-4 h-4 text-amber-400" />
+              <span>Mode-Specific Interactive Controls ({state.operatingMode})</span>
+            </h3>
+          </div>
+
+          {/* TP / Presenter / P2P Controls */}
+          {(state.operatingMode === 'TP' || state.operatingMode === 'Presenter' || state.operatingMode === 'TP_P2P' || state.operatingMode === 'Presenter_P2P') && (
+            <div className="space-y-3 text-xs font-mono">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] text-neutral-400 mb-1">Device Name / Label</label>
+                  <input
+                    type="text"
+                    value={state.deviceName}
+                    onChange={(e) => setState(prev => ({ ...prev, deviceName: e.target.value }))}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                  />
+                </div>
+                {(state.operatingMode === 'TP' || state.operatingMode === 'TP_P2P') && (
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      onClick={() => setState(prev => ({ ...prev, presenterCueActive: !prev.presenterCueActive }))}
+                      className={`w-full py-1.5 px-3 rounded-lg border font-bold transition-colors cursor-pointer ${
+                        state.presenterCueActive
+                          ? 'bg-emerald-950 text-emerald-300 border-emerald-600'
+                          : 'bg-neutral-950 text-neutral-300 border-neutral-700 hover:border-neutral-600'
+                      }`}
+                    >
+                      {state.presenterCueActive ? '✓ Presenter Cue Active' : 'Simulate Incoming Presenter Cue'}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {(state.operatingMode === 'TP_P2P' || state.operatingMode === 'Presenter_P2P') && (
+                <div className="p-3 bg-neutral-950 rounded-xl border border-neutral-800 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="text-purple-400 font-bold">P2P 250ms Heartbeat Monitor: </span>
+                      <span className="text-neutral-300">Group &quot;{state.pairingGroup}&quot; &rarr; {state.pairedTargetIP}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setState(prev => ({ ...prev, p2pDisconnected: !prev.p2pDisconnected, p2pMissed: prev.p2pDisconnected ? 0 : 5 }))}
+                      className={`px-3 py-1 rounded-lg border font-bold cursor-pointer ${
+                        state.p2pDisconnected
+                          ? 'bg-yellow-950 text-yellow-300 border-yellow-500 animate-pulse'
+                          : 'bg-neutral-900 text-neutral-300 border-neutral-700 hover:border-yellow-600'
+                      }`}
+                    >
+                      {state.p2pDisconnected ? 'Restore Heartbeat (Clear Fault)' : 'Simulate >4 Missed Pings (Disconnect Alarm)'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Promptside Mode Controls */}
+          {state.operatingMode === 'Promptside' && (
+            <div className="space-y-3 text-xs font-mono">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] text-neutral-400 mb-1">Wing Label</label>
+                  <input
+                    type="text"
+                    value={state.promptsideWingLabel}
+                    onChange={(e) => setState(prev => ({ ...prev, promptsideWingLabel: e.target.value }))}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-cyan-300"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-neutral-400 mb-1">Channel (1-64)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={64}
+                    value={state.promptsideChannel}
+                    onChange={(e) => setState(prev => ({ ...prev, promptsideChannel: parseInt(e.target.value) || 1 }))}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-neutral-400 mb-1">Cue Note (/text)</label>
+                  <input
+                    type="text"
+                    value={state.promptsideCueText}
+                    onChange={(e) => setState(prev => ({ ...prev, promptsideCueText: e.target.value }))}
+                    placeholder="LX 42 / FLY BAR 3"
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, promptsideState: 'standby_ack', promptsideAckDone: false }))}
+                  className="py-2 px-2 rounded-lg bg-red-950/80 border border-red-600 text-red-200 font-bold cursor-pointer"
+                >
+                  /standby (Flash ACK)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, promptsideState: 'standby', promptsideAckDone: true }))}
+                  className="py-2 px-2 rounded-lg bg-red-900/60 border border-red-700 text-white font-bold cursor-pointer"
+                >
+                  /standby (Solid)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, promptsideState: 'go' }))}
+                  className="py-2 px-2 rounded-lg bg-emerald-950/80 border border-emerald-600 text-emerald-200 font-bold cursor-pointer"
+                >
+                  /go (Green)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, promptsideState: 'off', promptsideAckDone: false }))}
+                  className="py-2 px-2 rounded-lg bg-neutral-950 border border-neutral-700 text-neutral-300 font-bold cursor-pointer"
+                >
+                  /off
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* MSC rtpMIDI Controls */}
+          {state.operatingMode === 'MSC_RTP_MIDI' && (
+            <div className="space-y-3 text-xs font-mono">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] text-neutral-400 mb-1">Cue Number</label>
+                  <input
+                    type="text"
+                    value={state.mscCurrentCue}
+                    onChange={(e) => setState(prev => ({ ...prev, mscCurrentCue: e.target.value }))}
+                    placeholder="42.5"
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-neutral-400 mb-1">MSC Device ID</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={127}
+                    value={state.mscDeviceId}
+                    onChange={(e) => setState(prev => ({ ...prev, mscDeviceId: parseInt(e.target.value) || 0 }))}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-neutral-400 mb-1">Button Return Note/CC</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={127}
+                    value={state.midiBtnNumber}
+                    onChange={(e) => setState(prev => ({ ...prev, midiBtnNumber: parseInt(e.target.value) || 60 }))}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, mscState: 'standby+', mscLastCommand: 'STANDBY+' }))}
+                  className="py-2 px-2 rounded-lg bg-red-950/80 border border-red-600 text-red-200 font-bold cursor-pointer"
+                >
+                  0x0B STANDBY+
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, mscState: 'standby', mscLastCommand: 'STOP' }))}
+                  className="py-2 px-2 rounded-lg bg-red-900/60 border border-red-700 text-white font-bold cursor-pointer"
+                >
+                  0x02 STOP
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, mscState: 'go', mscLastCommand: 'GO' }))}
+                  className="py-2 px-2 rounded-lg bg-emerald-950/80 border border-emerald-600 text-emerald-200 font-bold cursor-pointer"
+                >
+                  0x01 GO
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, mscState: 'off', mscLastCommand: 'ALL_OFF' }))}
+                  className="py-2 px-2 rounded-lg bg-neutral-950 border border-neutral-700 text-neutral-300 font-bold cursor-pointer"
+                >
+                  0x08 ALL_OFF
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ETC CueSystem Controls */}
+          {state.operatingMode === 'ETC_CueSystem' && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs font-mono">
+              <button
+                type="button"
+                onClick={() => setState(prev => ({ ...prev, cueState: 'standby', cueAckActive: false }))}
+                className="py-2 px-3 rounded-lg bg-red-950/80 border border-red-600 text-red-200 font-bold cursor-pointer"
+              >
+                CS,{state.cueChannel},STANDBY (Flash)
+              </button>
+              <button
+                type="button"
+                onClick={() => setState(prev => ({ ...prev, cueState: 'go', cueAckActive: false }))}
+                className="py-2 px-3 rounded-lg bg-emerald-950/80 border border-emerald-600 text-emerald-200 font-bold cursor-pointer"
+              >
+                CS,{state.cueChannel},GO (Green)
+              </button>
+              <button
+                type="button"
+                onClick={() => setState(prev => ({ ...prev, cueState: 'off', cueAckActive: false }))}
+                className="py-2 px-3 rounded-lg bg-neutral-950 border border-neutral-700 text-neutral-300 font-bold cursor-pointer"
+              >
+                CS,{state.cueChannel},OFF
+              </button>
+            </div>
+          )}
+
+          {/* NMOS IS-07 Controls */}
+          {state.operatingMode === 'NMOS_IS07' && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs font-mono">
+              <button
+                type="button"
+                onClick={() => setState(prev => ({ ...prev, nmosOnAir: !prev.nmosOnAir }))}
+                className={`py-2 px-3 rounded-lg border font-bold cursor-pointer ${state.nmosOnAir ? 'bg-red-700 text-white border-red-400' : 'bg-neutral-950 text-red-300 border-neutral-700'}`}
+              >
+                PRG: {state.nmosOnAir ? 'ACTIVE' : 'OFF'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setState(prev => ({ ...prev, nmosPreview: !prev.nmosPreview }))}
+                className={`py-2 px-3 rounded-lg border font-bold cursor-pointer ${state.nmosPreview ? 'bg-emerald-700 text-white border-emerald-400' : 'bg-neutral-950 text-emerald-300 border-neutral-700'}`}
+              >
+                PVW: {state.nmosPreview ? 'ACTIVE' : 'OFF'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setState(prev => ({ ...prev, nmosAux: !prev.nmosAux }))}
+                className={`py-2 px-3 rounded-lg border font-bold cursor-pointer ${state.nmosAux ? 'bg-amber-600 text-black border-amber-300' : 'bg-neutral-950 text-amber-300 border-neutral-700'}`}
+              >
+                AUX: {state.nmosAux ? 'ACTIVE' : 'OFF'}
+              </button>
+            </div>
+          )}
+
+          {/* rtpMIDI 6-Color Matrix */}
+          {state.operatingMode === 'RTP_MIDI' && (
+            <div className="space-y-3 text-xs font-mono">
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                {([
+                  ['red', 'Red', 'bg-red-700 border-red-400 text-white'],
+                  ['flashRed', 'Flash', 'bg-red-900 border-red-500 text-red-200'],
+                  ['green', 'Green', 'bg-emerald-700 border-emerald-400 text-white'],
+                  ['yellow', 'Yellow', 'bg-yellow-500 border-yellow-300 text-black'],
+                  ['blue', 'Blue', 'bg-blue-700 border-blue-400 text-white'],
+                  ['white', 'White', 'bg-neutral-200 border-white text-black'],
+                ] as const).map(([key, label, activeCls]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() =>
+                      setState(prev => ({
+                        ...prev,
+                        rtpMidiState: { ...prev.rtpMidiState, [key]: !prev.rtpMidiState[key] }
+                      }))
+                    }
+                    className={`py-2 px-2 rounded-lg border font-bold cursor-pointer ${
+                      state.rtpMidiState[key] ? activeCls : 'bg-neutral-950 border-neutral-700 text-neutral-300'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="text-[11px] text-neutral-400">
+                Single Tap transmits configured MIDI Return Action: Type {state.midiBtnType}, Ch {state.midiBtnChannel}, Note/CC #{state.midiBtnNumber}.
+              </div>
+            </div>
+          )}
+
+          {/* OSC Mode 6-Color + Scrolling Ticker */}
+          {state.operatingMode === 'OSC' && (
+            <div className="space-y-3 text-xs font-mono">
+              <div>
+                <label className="block text-[11px] text-neutral-400 mb-1">Custom OSC Text Message ({state.oscPrefix}/text)</label>
+                <input
+                  type="text"
+                  value={state.oscCustomMessage}
+                  onChange={(e) => setState(prev => ({ ...prev, oscCustomMessage: e.target.value }))}
+                  placeholder="RECORDING - STUDIO A (Scrolls if >10 chars)"
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                />
+              </div>
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                {([
+                  ['red', 'Red', 'bg-red-700 border-red-400 text-white'],
+                  ['flashRed', 'Flash', 'bg-red-900 border-red-500 text-red-200'],
+                  ['green', 'Green', 'bg-emerald-700 border-emerald-400 text-white'],
+                  ['yellow', 'Yellow', 'bg-yellow-500 border-yellow-300 text-black'],
+                  ['blue', 'Blue', 'bg-blue-700 border-blue-400 text-white'],
+                  ['white', 'White', 'bg-neutral-200 border-white text-black'],
+                ] as const).map(([key, label, activeCls]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() =>
+                      setState(prev => ({
+                        ...prev,
+                        oscState: { ...prev.oscState, [key]: !prev.oscState[key] }
+                      }))
+                    }
+                    className={`py-2 px-2 rounded-lg border font-bold cursor-pointer ${
+                      state.oscState[key] ? activeCls : 'bg-neutral-950 border-neutral-700 text-neutral-300'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* TSL 3.1 / 5.0 Controls */}
+          {(state.operatingMode === 'TSL_31' || state.operatingMode === 'TSL_50') && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono">
+              <div>
+                <label className="block text-[11px] text-neutral-400 mb-1">Centered Source Name</label>
+                <input
+                  type="text"
+                  value={state.operatingMode === 'TSL_31' ? state.tsl31Name : state.tsl50Name}
+                  onChange={(e) =>
+                    setState(prev =>
+                      prev.operatingMode === 'TSL_31'
+                        ? { ...prev, tsl31Name: e.target.value }
+                        : { ...prev, tsl50Name: e.target.value }
+                    )
+                  }
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-neutral-400 mb-1">Transport</label>
+                <select
+                  value={state.operatingMode === 'TSL_31' ? state.tsl31Transport : state.tsl50Transport}
+                  onChange={(e) => {
+                    const t = e.target.value as 'UDP' | 'TCP';
+                    setState(prev =>
+                      prev.operatingMode === 'TSL_31'
+                        ? { ...prev, tsl31Transport: t }
+                        : { ...prev, tsl50Transport: t }
+                    );
+                  }}
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                >
+                  <option value="UDP">UDP</option>
+                  <option value="TCP">TCP</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] text-neutral-400 mb-1">
+                  {state.operatingMode === 'TSL_31' ? 'TSL Address (0=Any)' : 'Index (0=Any)'}
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={127}
+                  value={state.operatingMode === 'TSL_31' ? state.tsl31Address : state.tsl50Index}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value) || 0;
+                    setState(prev =>
+                      prev.operatingMode === 'TSL_31'
+                        ? { ...prev, tsl31Address: n }
+                        : { ...prev, tsl50Index: n }
+                    );
+                  }}
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* OSC Cue Light Controls */}
+          {state.operatingMode === 'OSC_CueLight' && (
+            <div className="space-y-3 text-xs font-mono">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] text-neutral-400 mb-1">Top Banner Text</label>
+                  <input
+                    type="text"
+                    value={state.oscCueBanner}
+                    onChange={(e) => setState(prev => ({ ...prev, oscCueBanner: e.target.value }))}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-amber-300"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-neutral-400 mb-1">Cue Message</label>
+                  <input
+                    type="text"
+                    value={state.oscCueMessage}
+                    onChange={(e) => setState(prev => ({ ...prev, oscCueMessage: e.target.value }))}
+                    placeholder="SCENE 4 FLY CUE"
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-white"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, oscCueState: 'standby_ack', oscCueAckDone: false }))}
+                  className="py-2 px-2 rounded-lg bg-red-950/80 border border-red-600 text-red-200 font-bold cursor-pointer"
+                >
+                  /standby_ack
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, oscCueState: 'standby', oscCueAckDone: true }))}
+                  className="py-2 px-2 rounded-lg bg-red-900/60 border border-red-700 text-white font-bold cursor-pointer"
+                >
+                  /standby
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, oscCueState: 'go' }))}
+                  className="py-2 px-2 rounded-lg bg-emerald-950/80 border border-emerald-600 text-emerald-200 font-bold cursor-pointer"
+                >
+                  /go
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, oscCueState: 'off', oscCueAckDone: false }))}
+                  className="py-2 px-2 rounded-lg bg-neutral-950 border border-neutral-700 text-neutral-300 font-bold cursor-pointer"
+                >
+                  /off
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Thermal Eco, Timezone/MTC, ENV Sensor & Hardware Controls */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Power, Thermal & Display Controls */}
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-5 shadow-xl space-y-3 text-xs font-mono">
+            <h3 className="text-sm font-semibold text-neutral-200 uppercase tracking-wider flex items-center gap-2 font-sans">
+              <Sun className="w-4 h-4 text-cyan-400" />
+              <span>Display, Orientation &amp; Thermal Eco</span>
+            </h3>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-[11px] text-neutral-400 mb-1">CPU Clock Profile</label>
+                <select
+                  value={state.cpuFrequency}
+                  onChange={(e) => setState(prev => ({ ...prev, cpuFrequency: parseInt(e.target.value) as 80 | 160 | 240 }))}
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-white"
+                >
+                  <option value={80}>80 MHz (Eco ~35C)</option>
+                  <option value={160}>160 MHz (Balanced)</option>
+                  <option value={240}>240 MHz (Max Clock)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] text-neutral-400 mb-1">LCD Rotation</label>
+                <select
+                  value={state.imuRotation}
+                  onChange={(e) => setState(prev => ({ ...prev, imuRotation: parseInt(e.target.value) as 0 | 90 | 180 | 270 }))}
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-white"
+                >
+                  <option value={0}>0&deg; Portrait</option>
+                  <option value={90}>90&deg; Landscape</option>
+                  <option value={180}>180&deg; Inverted</option>
+                  <option value={270}>270&deg; Landscape</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setState(prev => ({ ...prev, isScreenDimmed: !prev.isScreenDimmed }))}
+                className={`flex-1 py-1.5 px-2.5 rounded-lg border font-bold cursor-pointer ${
+                  state.isScreenDimmed
+                    ? 'bg-amber-950 border-amber-500 text-amber-300'
+                    : 'bg-neutral-950 border-neutral-700 text-neutral-300'
+                }`}
+              >
+                {state.isScreenDimmed ? 'Wake Display (100%)' : 'Simulate Auto-Dim (10%)'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setState(prev => ({ ...prev, flashActive: true }));
+                  setTimeout(() => setState(prev => ({ ...prev, flashActive: false })), 1500);
+                }}
+                className="py-1.5 px-3 rounded-lg bg-neutral-950 hover:bg-neutral-800 border border-neutral-700 text-white font-bold cursor-pointer"
+              >
+                Flash Identify
+              </button>
+            </div>
+          </div>
+
+          {/* Timezone, MTC Timecode & Shared I2C ENV Sensor */}
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-5 shadow-xl space-y-3 text-xs font-mono">
+            <h3 className="text-sm font-semibold text-neutral-200 uppercase tracking-wider flex items-center gap-2 font-sans">
+              <Thermometer className="w-4 h-4 text-emerald-400" />
+              <span>MTC Timecode &amp; I2C ENV Sensor</span>
+            </h3>
+
+            <div className="flex items-center justify-between gap-2 p-2.5 bg-neutral-950 rounded-lg border border-neutral-800">
+              <label className="flex items-center gap-2 cursor-pointer text-neutral-200">
+                <input
+                  type="checkbox"
+                  checked={state.mtcReaderEnabled}
+                  onChange={(e) => setState(prev => ({ ...prev, mtcReaderEnabled: e.target.checked }))}
+                />
+                <span>MTC Reader Header</span>
+              </label>
+              <input
+                type="text"
+                value={state.mtcTimecode}
+                onChange={(e) => setState(prev => ({ ...prev, mtcTimecode: e.target.value }))}
+                className="w-28 bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-amber-300 text-center"
+              />
+            </div>
+
+            <div className="p-2.5 bg-neutral-950 rounded-lg border border-neutral-800 space-y-2">
+              <label className="flex items-center justify-between cursor-pointer text-neutral-200">
+                <span className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={state.envSensorEnabled}
+                    onChange={(e) => setState(prev => ({ ...prev, envSensorEnabled: e.target.checked }))}
+                  />
+                  <span>External I2C ENV (GPIO 33/32)</span>
+                </span>
+                <span className="text-emerald-400 font-bold">
+                  {state.envTemperature.toFixed(1)}C / {state.envHumidity.toFixed(0)}%
+                </span>
+              </label>
+              {state.envSensorEnabled && (
+                <div className="grid grid-cols-3 gap-2">
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={state.envTemperature}
+                    onChange={(e) => setState(prev => ({ ...prev, envTemperature: parseFloat(e.target.value) || 22.0 }))}
+                    className="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-white"
+                    title="Temperature (C)"
+                  />
+                  <input
+                    type="number"
+                    step="1"
+                    value={state.envHumidity}
+                    onChange={(e) => setState(prev => ({ ...prev, envHumidity: parseFloat(e.target.value) || 45.0 }))}
+                    className="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-white"
+                    title="Humidity (%)"
+                  />
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={state.envPressure}
+                    onChange={(e) => setState(prev => ({ ...prev, envPressure: parseFloat(e.target.value) || 1013.2 }))}
+                    className="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-white"
+                    title="Pressure (hPa)"
+                  />
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>

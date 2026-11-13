@@ -122,7 +122,7 @@ export default function App() {
     cueState: 'off',
     nmosHost: '192.168.1.200',
     nmosPort: 8235,
-    nmosSource: 'm5atoms3r-tally-source-01',
+    nmosSource: 'olimex-poe2-tally-01',
     nmosTopic: 'device/tally/state',
     nmosProgramTopic: 'tally/program',
     nmosPreviewTopic: 'tally/preview',
@@ -561,10 +561,10 @@ export default function App() {
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400" />
-            <span>Target: M5Stack M5AtomS3R + AtomPoE (W5500 SPI Ethernet Base)</span>
+            <span>Target: Olimex ESP32-PoE2 + Waveshare 1.69&quot; Touch LCD (LAN8720A RMII PoE)</span>
           </div>
           <div>
-            Libraries: MycilaESPConnect · M5Unified · M5GFX · SocketIOclient · Arduino_JSON
+            Libraries: MycilaESPConnect · LovyanGFX · ESPAsyncWebServer · SocketIOclient · Arduino_JSON
           </div>
         </div>
       </footer>

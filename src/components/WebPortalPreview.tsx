@@ -124,6 +124,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
   const [formMidiBtnNumber, setFormMidiBtnNumber] = useState(state.midiBtnNumber);
   const [formMidiBtnPress, setFormMidiBtnPress] = useState(state.midiBtnPress);
   const [formMidiBtnRelease, setFormMidiBtnRelease] = useState(state.midiBtnRelease);
+  const [formRotation, setFormRotation] = useState<0 | 90 | 180 | 270>(state.imuRotation || 0);
 
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
@@ -194,7 +195,8 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
       rtpMidiNumWhite: formRtpNumWhite,
       oscPort: formOscPort,
       oscPrefix: formOscPrefix,
-      oscCustomMessage: formOscMessage
+      oscCustomMessage: formOscMessage,
+      imuRotation: formRotation
     }));
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 2500);
@@ -207,7 +209,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
       setIsScanning(false);
       setDiscoveredPeers([
         {
-          name: 'M5AtomS3R-Presenter-01',
+          name: 'Olimex-PoE2-Presenter-01',
           role: 'presenter',
           ip: '192.168.1.120',
           port: 8910,
@@ -215,7 +217,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
           mode: 'p2p'
         },
         {
-          name: 'M5AtomS3R-TP-Console',
+          name: 'Olimex-PoE2-TP-Console',
           role: 'tp',
           ip: '192.168.1.105',
           port: 8910,
@@ -265,7 +267,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
             </div>
             <div className="ml-4 flex items-center gap-2 px-3 py-1 bg-neutral-900 rounded-lg border border-neutral-800 text-xs font-mono text-neutral-300 w-64 sm:w-96">
               <Globe className="w-3.5 h-3.5 text-neutral-500" />
-              <span>http://{currentIP}/ (or AtomS3R-CueLX.local)</span>
+              <span>http://{currentIP}/ (or Olimex-PoE2-CueLX.local)</span>
             </div>
           </div>
 
@@ -412,7 +414,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
                   {formMode === 'TP' && 'Button click transmits Red TSL Program tally (0x32) back to Tally Arbiter.'}
                   {formMode === 'TP_P2P' && 'Direct P2P Master: Toggles Program to paired Presenter; 250ms heartbeat with disconnect alarm.'}
                   {formMode === 'Presenter_P2P' && 'Direct P2P Slave: Displays TP Program/Preview tally; 250ms heartbeat with disconnect alarm.'}
-                  {formMode === 'TSL_31' && 'Standard TSL 3.1 UMD listener via UDP/TCP. Displays tally and centers name prominently on 128x128 LCD.'}
+                  {formMode === 'TSL_31' && 'Standard TSL 3.1 UMD listener via UDP/TCP. Displays tally and centers name prominently on 240×280 ST7789V2 LCD.'}
                   {formMode === 'TSL_50' && 'TSL 5.0 binary protocol via UDP/TCP. Filters by Screen & Index, displaying centered camera name.'}
                   {formMode === 'OSC_CueLight' && 'RSMCK OSC Cue Light for iOS on UDP 53000. Supports /standby_ack, /standby, /go, /off & /banner.'}
                   {formMode === 'Promptside' && 'Promptside theatrical cue system on UDP 8000: Flashing Red Standby, Screen ACK to Solid Red, Green GO, cue notes.'}
@@ -597,11 +599,27 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
                       className="mt-0.5 rounded border-neutral-700 text-emerald-500 focus:ring-emerald-500"
                     />
                     <label htmlFor="envSensor" className="text-xs font-medium text-neutral-200 cursor-pointer">
-                      <div>Enable M5Stack AtomENV Grove Sensor (SHT30 + BMP280)</div>
+                      <div>Enable External I2C ENV Sensor (SHT30 + BMP280)</div>
                       <div className="text-[11px] text-neutral-400 font-normal">
-                        Monitors rack/stage ambient Temperature, Relative Humidity, and Barometric Pressure on Grove I2C (SDA: GPIO 2, SCL: GPIO 1). Exposes live REST API at <code>GET /api/env</code>.
+                        Monitors rack/stage ambient Temperature, Relative Humidity, and Barometric Pressure on the shared Touch I2C bus (SDA: GPIO 33, SCL: GPIO 32). Exposes live REST API at <code>GET /api/env</code>.
                       </div>
                     </label>
+                  </div>
+
+                  <div className="p-2.5 bg-neutral-950 rounded-lg border border-neutral-800">
+                    <label className="block text-[11px] font-medium text-neutral-400 mb-1">
+                      Waveshare 1.69&quot; LCD Orientation
+                    </label>
+                    <select
+                      value={formRotation}
+                      onChange={(e) => setFormRotation(parseInt(e.target.value) as 0 | 90 | 180 | 270)}
+                      className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white cursor-pointer"
+                    >
+                      <option value={0}>0&deg; (Portrait - Default)</option>
+                      <option value={90}>90&deg; (Landscape Right)</option>
+                      <option value={180}>180&deg; (Inverted Portrait)</option>
+                      <option value={270}>270&deg; (Landscape Left)</option>
+                    </select>
                   </div>
                 </div>
               </div>
@@ -655,8 +673,8 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
 
                 <div className="p-2.5 bg-neutral-950 rounded-lg border border-neutral-800/80 text-[11px] text-neutral-400 leading-relaxed">
                   <strong className="text-cyan-300">PoE Thermal Safety Notice: </strong>
-                  The AtomPoE base steps down 48V PoE to 5V inside a compact 24×24×13mm sealed shell. 
-                  Setting the CPU to <strong>80 MHz</strong> reduces core dynamic power by ~60% while maintaining the APB bus at 80 MHz, preserving 100% full W5500 SPI line-rate speed and &lt;1ms tally latency. 
+                  The Olimex ESP32-PoE2 steps down 48V 802.3af PoE onboard while charging an optional LiPo cell via MCP73831. 
+                  Setting the CPU to <strong>80 MHz</strong> reduces core dynamic power by ~60% while maintaining the APB bus at 80 MHz, preserving 100% full LAN8720A RMII hardware MAC throughput and &lt;0.5ms tally latency. 
                   Wi-Fi and Bluetooth radios are shut down when Ethernet is linked to eliminate redundant RF heating.
                 </div>
               </div>
@@ -714,7 +732,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
                       type="text"
                       value={formDeviceName}
                       onChange={(e) => setFormDeviceName(e.target.value)}
-                      placeholder="AtomS3R-Tally-A4"
+                      placeholder="Olimex-PoE2-Tally-A4"
                       className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-sky-500"
                     />
                   </div>
@@ -1396,7 +1414,7 @@ export const WebPortalPreview: React.FC<WebPortalPreviewProps> = ({ state, setSt
                     <span>MIDI Button Return Feedback Action</span>
                   </h3>
                   <p className="text-[11px] text-neutral-400">
-                    Configure what MIDI message is sent back over rtpMIDI / AppleMIDI when the performer or operator clicks the AtomS3R front screen:
+                    Configure what MIDI message is sent back over rtpMIDI / AppleMIDI when the performer or operator taps the Waveshare 1.69&quot; touch screen:
                   </p>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>

@@ -10,7 +10,8 @@ export const PLATFORMIO_INI = `; PlatformIO Project Configuration for Olimex ESP
 ; Features LAN8720A RMII Ethernet, CST816T Capacitive Touch (Single/Double Tap), and LiPo Battery Sensing
 
 [env:esp32-poe]
-platform = espressif32 @ ^6.5.0
+; ESP32 Arduino Core 3.x (pioarduino) required for MycilaESPConnect + native LAN8720A RMII
+platform = https://github.com/pioarduino/platform-espressif32/releases/download/53.03.13/platform-espressif32.zip
 board = esp32-poe
 framework = arduino
 
@@ -26,6 +27,7 @@ board_build.flash_mode = dio
 board_build.partitions = min_spiffs.csv
 
 build_flags =
+    -D ESPCONNECT_ETH_SUPPORT
     ; Olimex LAN8720A RMII Native Hardware Ethernet
     -D ETH_PHY_TYPE=ETH_PHY_LAN8720
     -D ETH_PHY_ADDR=0
@@ -56,6 +58,7 @@ build_flags =
 
 lib_deps =
     lovyan03/LovyanGFX @ ^1.1.16
+    mathieucarbou/MycilaESPConnect @ ^10.6.3
     ESP32Async/AsyncTCP @ ^3.3.2
     ESP32Async/ESPAsyncWebServer @ ^3.6.0
     links2004/WebSockets @ ^2.4.1
@@ -82,113 +85,97 @@ if (M5.BtnA.wasDoubleClicked()) {
 }`,
     adapted: `// Olimex + Waveshare 1.69": CST816T Capacitive Touch Gestures
 void processTouchEvents() {
-  if (digitalRead(PIN_TOUCH_INT) == LOW) {
-    // Read CST816T gesture packet over I2C (0x15)
-    uint8_t gesture = readCST816TGesture();
-    
-    // Single Tap -> Equivalent to clicking the button:
+  if (digitalRead(PIN_TOUCH_INT) == LOW || touchPending) {
+    uint8_t gesture = readCST816TGesture(); // I2C 0x15 (GPIO 33/32)
+
+    // Single Tap -> Exact equivalent of clicking the button:
     if (gesture == GESTURE_SINGLE_TAP || isSingleTap()) {
-      handleScreenSingleTap(); // Toggles TSL return, ETC Ack, NMOS On-Air
+      handleScreenSingleTap(); // TSL return, ETC/Promptside ACK, MIDI return, NMOS
     }
-    // Double Tap -> Switches to Diagnostics Page:
+    // Double Tap (<350ms) -> Switches to Diagnostics Page:
     else if (gesture == GESTURE_DOUBLE_TAP || isDoubleTap()) {
       handleScreenDoubleTap(); // Toggles Screen 0 <-> Screen 1
     }
-    // Long Press -> Cycles Display Backlight:
+    // Long Press (>1.2s) -> Cycles Display Backlight:
     else if (gesture == GESTURE_LONG_PRESS) {
       handleScreenLongPress();
     }
   }
 }`,
-    explanation: 'The Waveshare 1.69" module eliminates mechanical wear with a modern CST816T capacitive touch screen. A single tap acts as the primary button click for sending tally cues or stage acknowledgments, while a double tap instantly navigates to the diagnostics page.'
+    explanation: 'The Waveshare 1.69" module replaces the mechanical button with a CST816T capacitive touch screen. A single tap triggers the exact mode-aware button action (including MIDI button return, Promptside/ETC/OSC CueLight ACK, and TSL cues), while a double tap switches between Screen 0 and Screen 1 Diagnostics.'
   },
   {
     category: 'Battery Charge Level & Status Readout',
-    original: `// Legacy: No battery monitoring (Strictly PoE wired power)`,
+    original: `// Legacy M5AtomS3R: No battery monitoring (Strictly PoE wired power)`,
     adapted: `// Olimex ESP32-PoE2: GPIO 35 ADC Battery Voltage & Charge Readout
 void readBatteryState() {
-  // Read ADC1_CH7 via 2:1 precision resistor divider
-  uint32_t adcRaw = analogRead(PIN_BATTERY_ADC);
-  float pinVoltage = (adcRaw / 4095.0f) * 3.30f * 1.05f;
-  battery.voltage = pinVoltage * 2.0f; // 2:1 divider factor
-
-  // Calculate battery charge level percentage (3.2V to 4.2V):
+  uint32_t mvTotal = 0;
+  for (int i = 0; i < 8; i++) mvTotal += analogReadMilliVolts(PIN_BATTERY_ADC);
+  battery.voltage = (mvTotal / 8000.0f) * BATTERY_DIVIDER; // 2:1 divider
   battery.percentage = mapLiPoPercentage(battery.voltage);
 
-  // Determine battery power status:
   if (eth_connected) {
-    battery.status = (battery.percentage >= 98) ? "PoE Powered (Full)" : "PoE Active (Charging)";
+    battery.status = (battery.voltage >= 4.15f)
+      ? "PoE Powered (Full)" : "PoE Active (Charging)";
   } else {
-    battery.status = (battery.voltage < 3.40f) ? "LOW BATTERY ALERT" : "LiPo Discharging";
+    battery.status = (battery.voltage < 3.40f)
+      ? "LOW BATTERY ALERT!" : "LiPo Discharging";
   }
 }`,
-    explanation: 'The Olimex ESP32-PoE2 includes an onboard Microchip MCP73831 LiPo charger with ADC battery voltage monitoring on GPIO 35. The firmware calculates accurate battery voltage, percentage (0-100%), and power rail status, displaying them on both Screen 0 and Screen 1.'
+    explanation: 'The Olimex ESP32-PoE2 includes an onboard Microchip MCP73831 LiPo charger with ADC battery voltage monitoring on GPIO 35. The firmware calculates calibrated battery voltage, percentage (0-100%), and power rail status on Screen 0, Screen 1, the Web UI, and /api/battery.'
   },
   {
-    category: 'Display Resolution & DMA Double Buffering',
-    original: `// Legacy M5AtomS3R: 128x128 GC9107 Color LCD
+    category: 'Display Resolution & LovyanGFX DMA Double Buffering',
+    original: `// M5AtomS3R: 128x128 GC9107 Color LCD via M5GFX
 M5Canvas canvas(&M5.Display);
-canvas.createSprite(128, 128); // 32KB buffer`,
-    adapted: `// Waveshare 1.69": 240x280 ST7789V2 IPS LCD (134.4 KB Double Buffer)
-#define LCD_WIDTH 240
-#define LCD_HEIGHT 280
+canvas.createSprite(128, 128); // 32 KB buffer`,
+    adapted: `// Waveshare 1.69": 240x280 ST7789V2 IPS LCD via LovyanGFX
+LGFX lcd;
+LGFX_Sprite canvas(&lcd);
 // 240 x 280 x 2 bytes = 134,400 bytes allocated in ESP32 SRAM
-uint16_t* frameBuffer = (uint16_t*)malloc(LCD_WIDTH * LCD_HEIGHT * 2);
+bool useDoubleBuffer = canvas.createSprite(LCD_WIDTH, LCD_HEIGHT);
 
 void renderScreen() {
-  // Off-screen compositing into frameBuffer:
-  drawHeaderWithBatteryAndClock(frameBuffer);
-  drawTallyContent(frameBuffer);
-  // Atomic DMA push to Waveshare ST7789V2:
-  lcdPushDMA(frameBuffer, 240, 280);
+  canvas.fillScreen(bgColor);
+  drawHeaderWithBatteryAndClock(&canvas); // Clock or MTC + Battery %/V
+  drawTallyContent(&canvas);
+  canvas.pushSprite(0, 0); // Atomic SPI DMA blit to ST7789V2
 }`,
-    explanation: 'The Waveshare 1.69" IPS panel provides a much larger 240x280 display area with superior viewing angles. A full 134.4 KB RGB565 double-buffer in ESP32 RAM guarantees zero-flicker updates across rapid tally transitions.'
+    explanation: 'The Waveshare 1.69" IPS panel provides a 240x280 rounded-corner display driven by LovyanGFX LGFX_Sprite double-buffering (134.4 KB) with a direct-draw fallback if heap is fragmented.'
   },
   {
     category: 'Ethernet Architecture: LAN8720A RMII vs W5500 SPI',
-    original: `// Legacy AtomPoE: External W5500 via SPI bus
+    original: `// M5AtomS3R + AtomPoE: External W5500 via SPI bus
 SPI.begin(5, 7, 8, 6);
-ETH.begin(ETH_PHY_W5500, 1, 6, -1, -1, SPI);
-// Limited by SPI clock bandwidth & polling overhead`,
+ETH.begin(ETH_PHY_W5500, 1, 6, -1, -1, SPI);`,
     adapted: `// Olimex ESP32-PoE2: Native ESP32 EMAC + Microchip LAN8720A RMII
 ETH.begin(ETH_PHY_LAN8720, 0, 23, 18, 12, ETH_CLOCK_GPIO0_IN);
-// Direct 50 MHz RMII hardware link to ESP32 internal MAC`,
-    explanation: 'The Olimex ESP32-PoE2 uses the native ESP32 RMII Ethernet MAC connected directly to a LAN8720A transceiver at 50 MHz. This provides full 10/100 Mbps hardware packet processing, eliminating SPI bus bottlenecks and reducing packet latency to under 0.5 ms.'
+// Managed via MycilaESPConnect + RF Shutdown on PoE link:
+if (ETH.linkUp()) {
+  WiFi.mode(WIFI_OFF);
+  esp_wifi_stop();
+  esp_bt_controller_disable();
+}`,
+    explanation: 'The Olimex ESP32-PoE2 uses the native ESP32 RMII Ethernet MAC connected to a LAN8720A transceiver at 50 MHz with MycilaESPConnect. When PoE Ethernet links up, Wi-Fi and Bluetooth radios shut down to prevent dual-IP routing issues and reduce heat.'
   },
   {
-    category: 'Diagnostics Page Background Follows Active Tally',
-    original: `// Legacy: Diagnostics page was strictly static black
-if (currentScreen == 1) {
-  g->fillScreen(TFT_BLACK);
-}`,
-    adapted: `// Olimex + Waveshare: Diagnostics page dynamically mirrors active tally color
-void renderScreen() {
-  uint16_t bgColor = getActiveTallyColor(); // Red, Green, Amber, Blue, White, or Flash
-  if (currentScreen == 1) {
-    fillBuffer(frameBuffer, bgColor); // Whole diagnostics page follows tally!
-    drawDiagnosticsText(frameBuffer, textColor);
-    drawBatteryDiagnostics(frameBuffer);
-  }
-}`,
-    explanation: 'Operators checking IP settings, battery health, or network telemetry on Screen 1 can immediately see live tally state changes because the diagnostics background color dynamically tracks the active tally engine in real time.'
+    category: 'Promptside, MSC rtpMIDI, MTC Timecode & MIDI Button Return',
+    original: `// Original Base Firmware: 11 modes, SNTP clock only, passive rtpMIDI`,
+    adapted: `// Updated 13-Mode Universal Stack:
+// - Mode 7: Promptside (UDP 8000 /promptside/channel/<ch>/standby|go|off|text)
+// - Mode 8: MSC_RTP_MIDI (RP-002 SysEx 01 GO, 02 STOP, 0B STANDBY+ with cue #)
+// - Global MTC Reader: Decodes 0xF1 Quarter-Frame & SysEx Full-Frame HH:MM:SS:FF
+// - Global MIDI Return Action: Note/CC/PC transmitted on Single Tap`,
+    explanation: 'All updates from the M5AtomS3R reference firmware are integrated: Promptside theatrical wing cue lights, MIDI Show Control (MSC RP-002) over AppleMIDI, live SMPTE MTC timecode header readout, and configurable MIDI button return feedback.'
   },
   {
-    category: 'ETC CueSystem Flashing Standby & Touch Performer Acknowledgment',
-    original: `// Legacy: Mechanical button press sends CS,<ch>,ACK\\n`,
-    adapted: `// Olimex + Waveshare: Single Tap on screen transmits ETC CueSystem ACK
-if (cuesystem_standby_active) {
-  if (!cuesystem_ack_active) {
-    bgColor = ((millis() / 400) % 2 == 0) ? COLOR_RED : COLOR_BLACK; // Flashes Red
-  } else {
-    bgColor = COLOR_RED; // Solid Red once performer taps screen
-  }
-}
-void handleScreenSingleTap() {
-  cuesystem_ack_active = true;
-  udp.beginPacket(cuesystem_host.c_str(), cuesystem_port);
-  udp.print("CS," + String(cuesystem_channel) + ",ACK\\n");
-  udp.endPacket();
-}`,
-    explanation: 'Theatrical stage managers trigger flashing red Standby cues. When the actor or technician taps anywhere on the Waveshare 1.69" touch display, the unit transmits the acknowledgment packet and locks solid red.'
+    category: '250ms P2P Heartbeat, POSIX Timezones, Power Eco & Shared I2C ENV',
+    original: `// Legacy: Passive P2P UDP, manual GMT offset, fixed 240 MHz clock`,
+    adapted: `// Updated Global Architecture:
+// 1. P2P 250ms CXPING/CXPONG heartbeat -> >4 missed triggers Yellow DISCONNECTED alarm
+// 2. POSIX DST Timezones (configTzTime) for Europe/London, US, EU, Tokyo, Custom
+// 3. Power & Thermal Eco: 80/160/240 MHz CPU scaling, waiti idle yield, 10% Auto-Dim
+// 4. External SHT30 (0x44) + BMP280 (0x76) ENV sensor on shared I2C (GPIO 33/32)`,
+    explanation: 'Includes sub-second P2P disconnect fault detection, automatic DST timezone rules, 80 MHz PoE Eco thermal management with instant wake on cue/touch, and optional external SHT30/BMP280 environment telemetry exposed via /api/env alongside /api/battery and /api/power.'
   }
 ];

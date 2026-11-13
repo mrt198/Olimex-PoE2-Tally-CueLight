@@ -169,7 +169,7 @@ function formatSyntax(line: string, type: 'cpp' | 'ini') {
   if (line.includes('void ') || line.includes('bool ') || line.includes('int ') || line.includes('String ') || line.includes('char ')) {
     return <span className="text-cyan-200">{line}</span>;
   }
-  if (line.includes('M5Canvas') || line.includes('M5.Display') || line.includes('espConnect') || line.includes('socket')) {
+  if (line.includes('LGFX_Sprite') || line.includes('lcd.') || line.includes('canvas.') || line.includes('espConnect') || line.includes('socket')) {
     return <span className="text-emerald-300">{line}</span>;
   }
 

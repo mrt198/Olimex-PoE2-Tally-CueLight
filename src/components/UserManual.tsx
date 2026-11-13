@@ -76,8 +76,8 @@ export function UserManual() {
           { id: 'midi', label: 'rtpMIDI & MSC Control', icon: Music },
           { id: 'promptside', label: 'Promptside System', icon: Radio },
           { id: 'mtc', label: 'MTC Timecode Reader', icon: Clock },
-          { id: 'env', label: 'AtomENV Sensor & API', icon: Thermometer },
-          { id: 'imu', label: 'Auto-Orientation (IMU)', icon: Compass },
+          { id: 'env', label: 'I2C ENV Sensor & API', icon: Thermometer },
+          { id: 'imu', label: 'Display Orientation', icon: Compass },
           { id: 'pinout', label: 'Hardware Specs & Pinouts', icon: Cpu },
         ].map((tab) => {
           const Icon = tab.icon;
@@ -178,7 +178,7 @@ export function UserManual() {
               Overview of the 13 Operating Modes
             </h2>
             <p className="text-slate-300 text-sm">
-              The M5AtomS3R + AtomPoE firmware contains a universal protocol stack that allows the unit to transform into any of the following roles simply by selecting it in the web interface:
+              The Olimex ESP32-PoE2 + Waveshare 1.69&quot; Touch LCD firmware contains a universal protocol stack that allows the unit to transform into any of the following roles simply by selecting it in the web interface:
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
@@ -330,7 +330,7 @@ export function UserManual() {
               <h2 className="text-xl font-bold text-white">rtpMIDI (AppleMIDI) & MIDI Show Control (MSC RP-002)</h2>
             </div>
             <p className="text-slate-300 text-sm">
-              The AtomS3R firmware contains a full native AppleMIDI session initiator and responder on UDP port 5004. It connects natively to macOS Audio MIDI Setup, the rtpMIDI driver on Windows, and directly to QLab, Logic Pro, and lighting consoles.
+              The Olimex ESP32-PoE2 firmware contains a full native AppleMIDI session initiator and responder on UDP port 5004. It connects natively to macOS Audio MIDI Setup, the rtpMIDI driver on Windows, and directly to QLab, Logic Pro, and lighting consoles.
             </p>
 
             <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-3">
@@ -378,7 +378,7 @@ export function UserManual() {
             <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-2">
               <h3 className="font-semibold text-white text-sm">MIDI Hardware Button Return Action:</h3>
               <p className="text-slate-300 text-xs">
-                When operating in MIDI modes, clicking the AtomS3R screen button transmits a configured MIDI message back to the host computer:
+                When operating in MIDI modes, tapping the Waveshare 1.69&quot; touch screen transmits a configured MIDI message back to the host computer:
               </p>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-xs">
                 <div className="bg-slate-900 p-2 rounded border border-slate-700">
@@ -439,7 +439,7 @@ export function UserManual() {
 
             <div className="bg-fuchsia-950/20 border border-fuchsia-500/30 rounded-lg p-4 text-xs text-fuchsia-200 space-y-1">
               <p className="font-semibold">Performer Acknowledgment Workflow:</p>
-              <p>When the Stage Manager presses Standby on the console, the outstation flashes red. When talent presses the physical AtomS3R screen button, the outstation turns solid red and immediately sends <code>/promptside/channel/[ch]/ack 1</code> back to the Promptside corner console.</p>
+              <p>When the Stage Manager presses Standby on the console, the outstation flashes red. When talent taps the Waveshare 1.69&quot; touch screen, the outstation turns solid red and immediately sends <code>/promptside/channel/[ch]/ack 1</code> back to the Promptside corner console.</p>
             </div>
           </div>
         </div>
@@ -476,10 +476,10 @@ export function UserManual() {
           <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-6 space-y-4">
             <div className="flex items-center gap-2">
               <Thermometer className="w-5 h-5 text-emerald-400" />
-              <h2 className="text-xl font-bold text-white">M5Stack AtomENV Grove Sensor & REST API</h2>
+              <h2 className="text-xl font-bold text-white">External I2C ENV Sensor (SHT30 + BMP280) &amp; REST API</h2>
             </div>
             <p className="text-slate-300 text-sm">
-              When an M5Stack AtomENV unit is connected to the Grove port, the firmware monitors temperature, relative humidity, and atmospheric pressure.
+              When an optional SHT30 (0x44) and/or BMP280 (0x76) sensor is wired to the shared Touch I2C bus (SDA: GPIO 33, SCL: GPIO 32), the firmware monitors rack temperature, relative humidity, and atmospheric pressure.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -530,41 +530,41 @@ Content-Type: application/json
         </div>
       )}
 
-      {/* SECTION: IMU Auto-Orientation */}
+      {/* SECTION: Display Orientation */}
       {activeSection === 'imu' && (
         <div className="space-y-6">
           <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-6 space-y-4">
             <div className="flex items-center gap-2">
               <Compass className="w-5 h-5 text-sky-400" />
-              <h2 className="text-xl font-bold text-white">6-Axis Accelerometer IMU Auto-Orientation</h2>
+              <h2 className="text-xl font-bold text-white">Waveshare 1.69&quot; Display Orientation (LovyanGFX)</h2>
             </div>
             <p className="text-slate-300 text-sm">
-              The internal BMI270 6-axis IMU automatically detects gravity and changes display orientation so all text and cue graphics are always right-side up.
+              Unlike the M5AtomS3R, the Olimex ESP32-PoE2 does not include an onboard IMU accelerometer. Instead, you can select 0&deg;, 90&deg;, 180&deg;, or 270&deg; display orientation directly in the Web Portal and save it to NVS.
             </p>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
               <div className="bg-slate-800/60 border border-slate-700/60 p-3 rounded-lg">
-                <div className="text-white font-bold text-xs">0° (Upright)</div>
-                <div className="text-slate-400 text-[11px] mt-1">PoE & Grove base at bottom</div>
+                <div className="text-white font-bold text-xs">0&deg; Portrait</div>
+                <div className="text-slate-400 text-[11px] mt-1">240&times;280 upright default</div>
               </div>
               <div className="bg-slate-800/60 border border-slate-700/60 p-3 rounded-lg">
-                <div className="text-white font-bold text-xs">90° Right</div>
-                <div className="text-slate-400 text-[11px] mt-1">PoE base on left side</div>
+                <div className="text-white font-bold text-xs">90&deg; Right</div>
+                <div className="text-slate-400 text-[11px] mt-1">280&times;240 landscape mount</div>
               </div>
               <div className="bg-slate-800/60 border border-slate-700/60 p-3 rounded-lg">
-                <div className="text-white font-bold text-xs">180° Inverted</div>
-                <div className="text-slate-400 text-[11px] mt-1">PoE base at top</div>
+                <div className="text-white font-bold text-xs">180&deg; Inverted</div>
+                <div className="text-slate-400 text-[11px] mt-1">Top-cable mount upside down</div>
               </div>
               <div className="bg-slate-800/60 border border-slate-700/60 p-3 rounded-lg">
-                <div className="text-white font-bold text-xs">270° Left</div>
-                <div className="text-slate-400 text-[11px] mt-1">PoE base on right side</div>
+                <div className="text-white font-bold text-xs">270&deg; Left</div>
+                <div className="text-slate-400 text-[11px] mt-1">280&times;240 opposite landscape</div>
               </div>
             </div>
 
             <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-2 text-xs text-slate-300">
-              <h4 className="font-semibold text-white">Zero-Artifact Scanout Architecture:</h4>
+              <h4 className="font-semibold text-white">Double-Buffered LovyanGFX Scanout:</h4>
               <p>
-                To eliminate distortion and double-rotation bugs, the 32KB off-screen frame buffer remains in canonical 128x128 space, while <code>M5.Display.setRotation()</code> re-programs the hardware LCD MADCTL registers directly.
+                Off-screen compositing writes into the 134.4 KB <code>LGFX_Sprite</code> buffer while <code>lcd.setRotation()</code> re-programs the ST7789V2 MADCTL register cleanly with zero tearing.
               </p>
             </div>
           </div>
@@ -577,42 +577,42 @@ Content-Type: application/json
           <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-6 space-y-4">
             <div className="flex items-center gap-2">
               <Cpu className="w-5 h-5 text-emerald-400" />
-              <h2 className="text-xl font-bold text-white">Hardware Specs, Pinouts & Power Architecture</h2>
+              <h2 className="text-xl font-bold text-white">Olimex ESP32-PoE2 &amp; Waveshare 1.69&quot; Pinouts</h2>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-2">
-                <h3 className="font-semibold text-white text-sm">W5500 AtomPoE SPI Pinout</h3>
+                <h3 className="font-semibold text-white text-sm">LAN8720A RMII Ethernet &amp; Battery ADC</h3>
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="bg-slate-900 text-slate-400">
                       <th className="p-1.5 border border-slate-700">Signal</th>
-                      <th className="p-1.5 border border-slate-700">ESP32-S3 GPIO</th>
+                      <th className="p-1.5 border border-slate-700">ESP32 GPIO</th>
                     </tr>
                   </thead>
                   <tbody className="text-slate-300">
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">SCK</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-sky-400">GPIO 5</td></tr>
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">CS</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-sky-400">GPIO 6</td></tr>
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">MISO</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-sky-400">GPIO 7</td></tr>
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">MOSI</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-sky-400">GPIO 8</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">ETH_MDC / MDIO</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-sky-400">GPIO 23 / GPIO 18</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">ETH_POWER</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-sky-400">GPIO 12</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">ETH_CLK (50MHz IN)</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-sky-400">GPIO 0 (PHY_ADDR 0)</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">V_BAT ADC (2:1)</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-emerald-400">GPIO 35 (ADC1_CH7)</td></tr>
                   </tbody>
                 </table>
               </div>
 
               <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-2">
-                <h3 className="font-semibold text-white text-sm">Grove Port I2C (AtomENV Sensor)</h3>
+                <h3 className="font-semibold text-white text-sm">Waveshare 1.69&quot; LCD, CST816T Touch &amp; ENV I2C</h3>
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="bg-slate-900 text-slate-400">
-                      <th className="p-1.5 border border-slate-700">Wire Signal</th>
-                      <th className="p-1.5 border border-slate-700">ESP32-S3 GPIO</th>
+                      <th className="p-1.5 border border-slate-700">Signal</th>
+                      <th className="p-1.5 border border-slate-700">ESP32 GPIO</th>
                     </tr>
                   </thead>
                   <tbody className="text-slate-300">
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">SDA</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-emerald-400">GPIO 2</td></tr>
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">SCL</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-emerald-400">GPIO 1</td></tr>
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">Power</td><td className="p-1.5 border border-slate-700 text-slate-300 font-mono">5V / 3.3V</td></tr>
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">Ground</td><td className="p-1.5 border border-slate-700 text-slate-300 font-mono">GND</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">LCD MOSI / SCLK / CS</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-cyan-400">GPIO 13 / 14 / 15</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">LCD DC / RST / BL</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-cyan-400">GPIO 2 / 4 / 21</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">I2C SDA / SCL (Touch+ENV)</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-emerald-400">GPIO 33 / GPIO 32</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">Touch INT / RST</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-amber-400">GPIO 34 / GPIO 5</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -621,7 +621,7 @@ Content-Type: application/json
             <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-2 text-xs text-slate-300">
               <h4 className="font-semibold text-white">PoE vs Wi-Fi Precedence (No Dual-IP Collisions):</h4>
               <p>
-                When an active 802.3af PoE Ethernet cable is plugged into the AtomPoE base, the ESP32 automatically disconnects Wi-Fi and powers down the Wi-Fi radio (<code>WIFI_OFF</code>). This prevents IP conflicts, duplicate mDNS announcements, and routing loops. If Ethernet is unplugged, Wi-Fi automatically re-engages.
+                When an active 802.3af PoE Ethernet cable is plugged into the Olimex ESP32-PoE2 RJ45 MagJack, the ESP32 automatically disconnects Wi-Fi and powers down the Wi-Fi radio (<code>WIFI_OFF</code>) via <code>MycilaESPConnect</code>. This prevents IP conflicts, duplicate mDNS announcements, and routing loops. If Ethernet is unplugged, Wi-Fi automatically re-engages and the battery keeps the unit online seamlessly.
               </p>
             </div>
           </div>
@@ -645,10 +645,10 @@ Content-Type: application/json
             <div className="bg-amber-950/40 border border-amber-800/60 rounded-lg p-4 text-xs text-amber-200/90 space-y-1">
               <div className="font-bold flex items-center gap-1.5 text-amber-300">
                 <Info className="w-4 h-4" />
-                <span>Why Does the AtomPoE Unit Get Very Warm Out of the Box?</span>
+                <span>Why Optimize Thermal &amp; Battery Power on Olimex ESP32-PoE2?</span>
               </div>
               <p className="leading-relaxed">
-                The M5Stack AtomPoE base houses an IEEE 802.3af Power-over-Ethernet buck converter that drops incoming 48V DC down to 5V DC. Because the enclosure is a sealed 24×24×13 mm plastic shell with minimal surface area and no ventilation, power conversion inefficiencies directly convert into heat. At the default ESP32-S3 clock of 240 MHz with dual cores running, 100% LCD backlight, and active 2.4GHz RF radios, total electrical load reaches ~1.8 Watts, causing the enclosure to heat up to <strong>55°C – 60°C</strong>.
+                Running the ESP32 dual-core Xtensa LX6 at 240 MHz alongside 100% Waveshare ST7789V2 backlight, active Wi-Fi/BT radios, and IEEE 802.3af PoE step-down conversion draws ~1.8W, warming compact enclosures and draining attached LiPo cells quickly when untethered.
               </p>
             </div>
 
@@ -656,11 +656,11 @@ Content-Type: application/json
             <div className="bg-slate-800/60 border border-slate-700/60 rounded-lg p-4 space-y-2 text-xs text-slate-300">
               <h3 className="font-bold text-white text-sm">Why Generic Light Sleep / Deep Sleep Cannot Be Used</h3>
               <p className="leading-relaxed">
-                On the M5Stack AtomPoE base, the W5500 Ethernet interrupt pin (<code>ETH_PHY_IRQ</code>) is hardwired to <strong>-1 (unconnected)</strong>. The ESP32 SPI driver communicates with the W5500 over SPI2 (SCK:5, CS:6, MISO:7, MOSI:8) via task polling.
+                Although the Olimex ESP32-PoE2 uses an internal RMII EMAC linked to the LAN8720A PHY, broadcast tally &amp; theatrical cue protocols must maintain live TCP/UDP sockets and Socket.IO heartbeats with zero wake delay.
               </p>
               <ul className="list-disc list-inside space-y-1 text-slate-300 pl-1">
-                <li><strong className="text-red-400">Deep Sleep:</strong> Shuts down digital cores, dropping all TCP/UDP sockets. Waking requires a full MCU reboot (300ms+ delay), completely unsuitable for live cue lights.</li>
-                <li><strong className="text-amber-400">Automatic Light Sleep:</strong> Gates the APB bus clock. Because the W5500 has no interrupt line to wake the CPU when a broadcast packet arrives, incoming TSL 3.1, TSL 5.0, OSC, or rtpMIDI cue packets would experience severe latency (&gt;100ms) or buffer overflow.</li>
+                <li><strong className="text-red-400">Deep Sleep:</strong> Shuts down digital cores, dropping all TCP/UDP sockets and requiring a full MCU reboot (300ms+ delay).</li>
+                <li><strong className="text-amber-400">Automatic Light Sleep:</strong> Gates the APB clock and timers, introducing jitter and delayed responses to incoming TSL 3.1, TSL 5.0, OSC, or rtpMIDI cue frames.</li>
               </ul>
             </div>
 
@@ -674,7 +674,7 @@ Content-Type: application/json
                     <span>80 MHz CPU Clock (APB Bus Locked at 80 MHz)</span>
                   </div>
                   <p className="text-slate-300 leading-relaxed">
-                    By invoking <code>setCpuFrequencyMhz(80)</code>, both Xtensa LX7 cores run at 80 MHz instead of 240 MHz. Crucially, the Advanced Peripheral Bus (APB) clock remains locked at 80 MHz. This guarantees that W5500 SPI transactions run at 100% full line-rate (up to 20 MHz SPI), hardware timers remain accurate, and cue response latency remains sub-millisecond (&lt;1ms). Dynamic core power drops by ~60%.
+                    By invoking <code>setCpuFrequencyMhz(80)</code>, both Xtensa LX6 cores run at 80 MHz instead of 240 MHz while keeping the APB peripheral bus at 80 MHz. This preserves full LAN8720A RMII MAC packet throughput and sub-millisecond cue latency while cutting dynamic CPU power by ~60%.
                   </p>
                 </div>
 
@@ -684,7 +684,7 @@ Content-Type: application/json
                     <span>Complete RF Radio Shutdown on PoE Link</span>
                   </div>
                   <p className="text-slate-300 leading-relaxed">
-                    When Ethernet link is verified, firmware executes <code>WiFi.mode(WIFI_OFF); esp_wifi_stop(); btStop(); esp_bt_controller_disable();</code>. Powering down the 2.4GHz RF synthesizer, PA, and baseband controllers saves ~90–110 mA of continuous current draw (~0.35W electrical load), preventing duplicate ARP conflicts and eliminating high RF heat dissipation.
+                    When LAN8720A Ethernet links up, firmware executes <code>WiFi.mode(WIFI_OFF); esp_wifi_stop(); btStop(); esp_bt_controller_disable();</code>. Disabling the 2.4GHz RF synthesizer and baseband saves ~90–110 mA and reduces thermal load.
                   </p>
                 </div>
 
@@ -694,7 +694,7 @@ Content-Type: application/json
                     <span>FreeRTOS IDLE Yielding (waiti Instruction)</span>
                   </div>
                   <p className="text-slate-300 leading-relaxed">
-                    In <code>loop()</code>, when no packets are pending and screen tickers are static, the loop executes <code>vTaskDelay(pdMS_TO_TICKS(2))</code>. This yields execution to the FreeRTOS idle task, which invokes the Xtensa <code>waiti 0</code> opcode. The CPU pipeline halts and gates core logic until the next hardware timer tick, reducing idle core power by &gt;70% while W5500 internal 32KB hardware FIFOs buffer incoming network frames.
+                    In <code>loop()</code>, when no packets are pending and screen tickers are static, the loop executes <code>vTaskDelay(pdMS_TO_TICKS(2))</code>. This yields to the FreeRTOS idle task, invoking Xtensa <code>waiti 0</code> to halt core logic until the next interrupt while hardware RMII DMA rings buffer incoming frames.
                   </p>
                 </div>
 
@@ -704,7 +704,7 @@ Content-Type: application/json
                     <span>Display Auto-Dimming &amp; Instant Wake</span>
                   </div>
                   <p className="text-slate-300 leading-relaxed">
-                    The GC9107 LCD backlight draws ~40 mA at 100% brightness. When inactive in Standby / Off for longer than the configured timeout (default: 60s), backlight dims to 10% (brightness 25/255). The moment ANY cue or tally packet arrives (Program, Preview, Cue GO, OSC, MIDI) or the user touches the screen button or tilts the unit, display restores to 100% instantly with 0ms delay.
+                    The Waveshare ST7789V2 backlight (GPIO 21) dims to 10% PWM when idle in Standby/Off past the configured timeout (default: 60s). Any incoming tally/cue packet or capacitive touch on the CST816T restores 100% brightness in 0ms. Battery &amp; power telemetry are exposed at <code>GET /api/battery</code> and <code>GET /api/power</code>.
                   </p>
                 </div>
               </div>

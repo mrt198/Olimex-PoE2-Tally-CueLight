@@ -68,13 +68,43 @@ The Olimex ESP32-PoE2 includes an onboard **Microchip MCP73831 LiPo battery char
 | **Touch RST** | RST | **GPIO 5** | CST816T Hardware Reset |
 | **Battery ADC** | V_BAT_SENSE | **GPIO 35** | ADC1_CH7 via 2:1 divider ($V_{\text{bat}} = V_{\text{adc}} \times 2$) |
 | **Power** | 5V / 3.3V / GND | Header | Powered via 802.3af PoE, USB, or LiPo |
+| **External ENV I2C** | SDA / SCL (Optional) | **GPIO 33 / GPIO 32** | Shared I2C bus for SHT30 (`0x44`) + BMP280 (`0x76`) |
 
 ---
 
-## 🚀 Building & Flashing
+## 🎯 13 Supported Operating Modes & Global Features
+
+1. **TP (TA)** — Technical Producer with Tally Arbiter (Single Tap sends TSL 3.1 Program `0x32`)
+2. **Presenter (TA)** — Presenter with Tally Arbiter (Single Tap sends TSL 3.1 Preview `0x31`)
+3. **TP_P2P** — Standalone P2P Master (250ms `CXPING`/`CXPONG` heartbeat, >4 missed triggers Yellow `DISCONNECTED` alarm)
+4. **Presenter_P2P** — Standalone P2P Slave (250ms heartbeat + `PEER LOST` fault alarm)
+5. **ETC_CueSystem** — Flashing Red Standby → Single Tap ACK (`CS,<ch>,ACK\n`) → Solid Red → Green GO
+6. **NMOS_IS07** — AMWA NMOS IS-07 Event & Tally (`_nmos-registration._tcp` DNS-SD + Program/Preview/Aux)
+7. **Promptside** — Promptside Theatrical Cue Light (UDP 8000, wing banner, cue notes, `/ack 1`)
+8. **MSC_RTP_MIDI** — MIDI Show Control RP-002 over AppleMIDI (UDP 5004, GO/STOP/STANDBY+ with cue numbers)
+9. **RTP_MIDI** — AppleMIDI 6-color outstation with priority & configurable MIDI Button Return Feedback (Note/CC/PC)
+10. **OSC** — Open Sound Control (UDP 8000, 6 colors + horizontal scrolling text ticker)
+11. **TSL_31** — TSL UMD v3.1 dedicated listener (UDP/TCP, centered source name)
+12. **TSL_50** — TSL UMD v5.0 dedicated listener (UDP/TCP, 4 tally bits + UTF-8 name)
+13. **OSC_CueLight** — RSMCK OSC Cue Light for iOS (UDP 53000, persistent banner + `/ack`)
+
+**Global Features:**
+* **POSIX Timezone SNTP Clock** (automatic DST rules) & **MTC Timecode Reader** (`0xF1` Quarter-Frame & SysEx Full-Frame `HH:MM:SS:FF`)
+* **Power & Thermal Eco Management** (80/160/240 MHz CPU scaling, FreeRTOS `waiti` yield, 10% display auto-dimming with instant cue/touch wake, Wi-Fi/BT radio shutdown on PoE link)
+* **REST Telemetry APIs:** `/api/battery`, `/api/status`, `/api/config`, `/api/env`, `/api/power`, `/api/discover`, `/api/pair`, and `/manual`
+
+---
+
+## 🚀 Building & Flashing (ESP32 Arduino Core 3.x)
 
 ### Using PlatformIO:
 ```bash
 pio run -e esp32-poe -t upload
 pio device monitor -b 115200
 ```
+
+### Required Libraries:
+* `LovyanGFX` (v1.1.16+)
+* `MycilaESPConnect` (v10.6.3+, with `-D ESPCONNECT_ETH_SUPPORT`)
+* `ESPAsyncWebServer` & `AsyncTCP` (Mathieu Carbou / ESP32Async v3.6.0+ for ESP32 Core 3.x / mbedTLS 3.x)
+* `WebSockets` (`SocketIOclient`), `Arduino_JSON`, `ArduinoJson`

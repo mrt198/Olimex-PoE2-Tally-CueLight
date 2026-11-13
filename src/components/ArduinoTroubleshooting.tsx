@@ -67,7 +67,7 @@ bool getMD5(uint8_t * data, uint16_t len, char * output) {
                 </span>
               </div>
               <p className="text-xs text-neutral-300 mt-1 leading-relaxed">
-                <strong>Why this occurs:</strong> ESP32 Arduino Core <strong>3.0+</strong> (required for AtomPoE W5500 SPI Ethernet) upgrades the underlying cryptography engine to <strong>mbedTLS 3.x</strong>. In mbedTLS 3.x, the obsolete legacy wrapper methods <code className="text-amber-200">_starts_ret</code>, <code className="text-amber-200">_update_ret</code>, and <code className="text-amber-200">_finish_ret</code> were removed in favor of standard <code className="text-emerald-300">mbedtls_md5_starts()</code>. The legacy 2020 version of <code className="text-neutral-300">ESPAsyncWebServer</code> still uses the old names.
+                <strong>Why this occurs:</strong> ESP32 Arduino Core <strong>3.0+</strong> (required for <code className="text-cyan-300">MycilaESPConnect</code> v10+ &amp; Olimex ESP32-PoE2 LAN8720A RMII Ethernet) upgrades the underlying cryptography engine to <strong>mbedTLS 3.x</strong>. In mbedTLS 3.x, the obsolete legacy wrapper methods <code className="text-amber-200">_starts_ret</code>, <code className="text-amber-200">_update_ret</code>, and <code className="text-amber-200">_finish_ret</code> were removed in favor of standard <code className="text-emerald-300">mbedtls_md5_starts()</code>. Legacy versions of <code className="text-neutral-300">ESPAsyncWebServer</code> still use the old names.
               </p>
             </div>
           </div>
@@ -258,33 +258,33 @@ mbedtls_md5_finish(&_ctx, (unsigned char *)_buf);`}
         <div className="flex items-center gap-2 mb-4">
           <Cpu className="w-5 h-5 text-amber-400" />
           <h3 className="text-sm font-bold text-white">
-            Recommended Arduino IDE Tools Menu Configuration for M5AtomS3R
+            Recommended Arduino IDE Tools Menu Configuration for Olimex ESP32-PoE2
           </h3>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono">
           <div className="p-3 bg-neutral-950 rounded-xl border border-neutral-800">
             <span className="text-neutral-500 block text-[11px]">Board</span>
-            <span className="text-white font-bold">M5Stack AtomS3R</span>
-            <span className="text-[10px] text-neutral-400 block mt-0.5">(or ESP32S3 Dev Module)</span>
+            <span className="text-white font-bold">OLIMEX ESP32-POE2</span>
+            <span className="text-[10px] text-neutral-400 block mt-0.5">(or OLIMEX ESP32-POE)</span>
           </div>
 
           <div className="p-3 bg-neutral-950 rounded-xl border border-neutral-800">
-            <span className="text-neutral-500 block text-[11px]">PSRAM</span>
-            <span className="text-emerald-400 font-bold">OPI PSRAM</span>
-            <span className="text-[10px] text-neutral-400 block mt-0.5">8MB Octal PSRAM enabled</span>
+            <span className="text-neutral-500 block text-[11px]">Partition Scheme</span>
+            <span className="text-emerald-400 font-bold">Minimal SPIFFS</span>
+            <span className="text-[10px] text-neutral-400 block mt-0.5">1.9MB APP / OTA support</span>
           </div>
 
           <div className="p-3 bg-neutral-950 rounded-xl border border-neutral-800">
-            <span className="text-neutral-500 block text-[11px]">Flash Size &amp; Partition</span>
-            <span className="text-cyan-300 font-bold">8MB (64Mb)</span>
-            <span className="text-[10px] text-neutral-400 block mt-0.5">8MB with spiffs/fat</span>
+            <span className="text-neutral-500 block text-[11px]">Flash Mode &amp; Speed</span>
+            <span className="text-cyan-300 font-bold">DIO @ 40/80 MHz</span>
+            <span className="text-[10px] text-neutral-400 block mt-0.5">Upload Speed: 921600</span>
           </div>
 
           <div className="p-3 bg-neutral-950 rounded-xl border border-neutral-800">
-            <span className="text-neutral-500 block text-[11px]">USB CDC On Boot</span>
-            <span className="text-purple-300 font-bold">Enabled</span>
-            <span className="text-[10px] text-neutral-400 block mt-0.5">For Serial monitor @ 115200</span>
+            <span className="text-neutral-500 block text-[11px]">Required Libraries</span>
+            <span className="text-purple-300 font-bold">LovyanGFX + Mycila</span>
+            <span className="text-[10px] text-neutral-400 block mt-0.5">ESPAsyncWebServer + SocketIO</span>
           </div>
         </div>
       </div>
@@ -294,7 +294,7 @@ mbedtls_md5_finish(&_ctx, (unsigned char *)_buf);`}
         <div className="flex items-center gap-2">
           <Sparkles className="w-5 h-5 text-emerald-400" />
           <h3 className="text-sm font-bold text-white">
-            Root Cause &amp; Fix: 4-Second Clock Freeze &amp; Slow Tally Response (ESP32-S3 Dual-Core Architecture)
+            Root Cause &amp; Fix: 4-Second Clock Freeze &amp; Slow Tally Response (ESP32 Dual-Core Architecture)
           </h3>
         </div>
 
@@ -304,7 +304,7 @@ mbedtls_md5_finish(&_ctx, (unsigned char *)_buf);`}
             <span>Dual-Core FreeRTOS Isolation Architecture Implemented</span>
           </div>
           <p className="text-neutral-200">
-            <strong>Why it happened:</strong> Even with Ethernet connected, if the Tally Arbiter server is offline or unreachable at the configured IP/port, <code className="text-amber-300 font-mono">socket.loop()</code> triggers a synchronous TCP handshake inside <code className="text-neutral-200 font-mono">WiFiClient::connect()</code>. In lwIP, the SYN-ACK timeout is <strong>4000ms (4 seconds)</strong>. When executed in the main Arduino <code className="text-neutral-200 font-mono">loop()</code> on Core 1, it completely froze execution for 4 seconds on every reconnect cycle, halting clock updates, button clicks, and incoming UDP packets.
+            <strong>Why it happened:</strong> Even with Ethernet connected, if the Tally Arbiter server is offline or unreachable at the configured IP/port, <code className="text-amber-300 font-mono">socket.loop()</code> triggers a synchronous TCP handshake inside <code className="text-neutral-200 font-mono">WiFiClient::connect()</code>. In lwIP, the SYN-ACK timeout is <strong>4000ms (4 seconds)</strong>. When executed in the main Arduino <code className="text-neutral-200 font-mono">loop()</code> on Core 1, it completely froze execution for 4 seconds on every reconnect cycle, halting clock updates, touch taps, and incoming UDP packets.
           </p>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
             <div className="p-3 bg-neutral-950 rounded-lg border border-neutral-800">
@@ -340,12 +340,12 @@ mbedtls_md5_finish(&_ctx, (unsigned char *)_buf);`}
           </div>
 
           <div className="p-4 bg-neutral-950 rounded-xl border border-neutral-800 space-y-2">
-            <span className="text-cyan-400 font-bold block">2. W5500 Ethernet Direct Init</span>
+            <span className="text-cyan-400 font-bold block">2. LAN8720A RMII &amp; MycilaESPConnect</span>
             <p className="text-neutral-300 leading-relaxed text-[11px]">
-              <strong>Cause:</strong> In Arduino IDE, sketch <code className="text-amber-300">#define</code>s don&apos;t reach compiled library files, so <code className="text-red-300">ETH.begin()</code> was never called by MycilaESPConnect.
+              <strong>Cause:</strong> In Arduino IDE, sketch <code className="text-amber-300">#define</code>s don&apos;t automatically enable Ethernet inside precompiled library units unless <code className="text-neutral-200">ETH.begin()</code> and <code className="text-neutral-200">ESPCONNECT_ETH_SUPPORT</code> are configured.
             </p>
             <p className="text-emerald-300 leading-relaxed text-[11px]">
-              <strong>Fix:</strong> Explicitly initialized <code className="text-cyan-300">SPI.begin(5, 7, 8, 6)</code> and <code className="text-cyan-300">ETH.begin(ETH_PHY_W5500, 1, 6, -1, -1, SPI)</code> with <code className="text-cyan-300">WiFi.onEvent()</code> DHCP listener.
+              <strong>Fix:</strong> Explicitly define Olimex LAN8720A pins (<code className="text-cyan-300">ADDR=0, MDC=23, MDIO=18, PWR=12, CLK=GPIO0_IN</code>) and initialize <code className="text-cyan-300">MycilaESPConnect</code> with Ethernet precedence.
             </p>
           </div>
 
