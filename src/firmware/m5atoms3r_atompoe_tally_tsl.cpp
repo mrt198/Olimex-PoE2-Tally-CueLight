@@ -754,17 +754,13 @@ void sendtally(int channel, bool live) {
   // Presenter mode: sends TSL Preview (0x31) back when button pressed!
   // TP mode: sends TSL Program (0x32) back (as it does now)!
   if (isPresenter()) {
-    if (live) {
-      command[1] = (FULLBRIGHT + GREENTALLY); // 0x31 (Preview)
-    } else {
-      command[1] = (FULLBRIGHT);              // 0x30 (Off)
-    }
+    // Presenter owns GREENTALLY (Preview 0x01); preserve REDTALLY if Program is currently active
+    uint8_t flags = live ? GREENTALLY : 0;
+    if (usesTallyArbiter() && actualType == "\"program\"") flags |= REDTALLY;
+    command[1] = FULLBRIGHT + flags;
   } else {
-    if (live) {
-      command[1] = (FULLBRIGHT + REDTALLY);   // 0x32 (Program)
-    } else {
-      command[1] = (FULLBRIGHT);              // 0x30 (Off)
-    }
+    // TP owns REDTALLY (Program 0x02); activating Program clears Preview unless off
+    command[1] = live ? (FULLBRIGHT + REDTALLY) : FULLBRIGHT;
   }
 
   for (int i = 0; i < 16; i++) {
@@ -4037,11 +4033,12 @@ void loop() {
     }
   }
 
-  // Periodic TP state refresh (every 2 seconds)
+  // Periodic TP state refresh ONLY in standalone P2P mode (never in Tally Arbiter mode,
+  // where a blind 0x30 packet from TP would overwrite Presenter's active Preview tally)
   static unsigned long lastTPBroadcast = 0;
   if (millis() - lastTPBroadcast >= 2000) {
     lastTPBroadcast = millis();
-    if (networkConnected && isTP()) {
+    if (networkConnected && isP2PMode() && isTP()) {
       sendtally(1, ch1state);
     }
   }
@@ -4199,12 +4196,29 @@ void socket_Messaging(String payload) {
 
 void processTallyData() {
   bool typeChanged = false;
+  bool hasProgram = false;
+  bool hasPreview = false;
+  String bestType = "";
+  String bestColor = "";
+  int bestPriority = -1;
+
   for (int i = 0; i < DeviceStates.length(); i++) {
     if (DeviceStates[i]["sources"].length() > 0) {
+      String busId = JSON.stringify(DeviceStates[i]["busId"]);
+      String bType = getBusTypeById(busId);
+      String bColor = getBusColorById(busId);
+      int bPriority = getBusPriorityById(busId);
+
+      if (bType == "\"program\"") hasProgram = true;
+      else if (bType == "\"preview\"") hasPreview = true;
+
+      if (!typeChanged || bType == "\"program\"" ||
+          (bestType != "\"program\"" && (bPriority > bestPriority || (bPriority == bestPriority && bType == "\"preview\"")))) {
+        bestType = bType;
+        bestColor = bColor;
+        bestPriority = bPriority;
+      }
       typeChanged = true;
-      actualType     = getBusTypeById(JSON.stringify(DeviceStates[i]["busId"]));
-      actualColor    = getBusColorById(JSON.stringify(DeviceStates[i]["busId"]));
-      actualPriority = getBusPriorityById(JSON.stringify(DeviceStates[i]["busId"]));
     }
   }
 
@@ -4212,7 +4226,19 @@ void processTallyData() {
     actualType = "";
     actualColor = "";
     actualPriority = 0;
+  } else {
+    actualType = bestType;
+    actualColor = bestColor;
+    actualPriority = bestPriority;
   }
+
+  // Keep local ch1state synced with Tally Arbiter server state
+  // (e.g., if TP activates Program, Presenter's ch1state resets cleanly to false)
+  if (usesTallyArbiter()) {
+    if (isTP()) ch1state = hasProgram;
+    else if (isPresenter()) ch1state = hasPreview;
+  }
+
   evaluateMode();
 }
 
