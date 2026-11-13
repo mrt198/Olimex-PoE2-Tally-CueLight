@@ -43,12 +43,12 @@ build_flags =
     -D PIN_LCD_CS=15
     -D PIN_LCD_DC=2
     -D PIN_LCD_RST=4
-    -D PIN_LCD_BL=21
+    -D PIN_LCD_BL=5
     ; Waveshare CST816T Capacitive Touch (I2C)
     -D PIN_TOUCH_SDA=33
     -D PIN_TOUCH_SCL=32
     -D PIN_TOUCH_INT=34
-    -D PIN_TOUCH_RST=5
+    -D PIN_TOUCH_RST=4
     -D CST816T_I2C_ADDR=0x15
     ; Olimex LiPo Battery Sensing (ADC1_CH7 on GPIO 35)
     -D PIN_BATTERY_ADC=35
@@ -83,26 +83,32 @@ if (M5.BtnA.wasClicked()) {
 if (M5.BtnA.wasDoubleClicked()) {
   currentScreen = !currentScreen;
 }`,
-    adapted: `// Olimex + Waveshare 1.69": CST816T Capacitive Touch Gestures
+    adapted: `// Olimex + Waveshare 1.69": Debounced CST816T Capacitive Touch
 void processTouchEvents() {
-  if (digitalRead(PIN_TOUCH_INT) == LOW || touchPending) {
-    uint8_t gesture = readCST816TGesture(); // I2C 0x15 (GPIO 33/32)
-
-    // Single Tap -> Exact equivalent of clicking the button:
-    if (gesture == GESTURE_SINGLE_TAP || isSingleTap()) {
-      handleScreenSingleTap(); // TSL return, ETC/Promptside ACK, MIDI return, NMOS
-    }
-    // Double Tap (<350ms) -> Switches to Diagnostics Page:
-    else if (gesture == GESTURE_DOUBLE_TAP || isDoubleTap()) {
-      handleScreenDoubleTap(); // Toggles Screen 0 <-> Screen 1
-    }
-    // Long Press (>1.2s) -> Cycles Display Backlight:
-    else if (gesture == GESTURE_LONG_PRESS) {
-      handleScreenLongPress();
+  // Poll every 20ms while INT==LOW or finger is held (INT pulses briefly)
+  if (digitalRead(PIN_TOUCH_INT) == LOW || touch.isPressed) {
+    readCST816TRegisters(0x01, &gesture, &points, &x, &y); // I2C 0x15 (33/32)
+    if (points >= 1 && points <= 2) {
+      // Reject lift-off chatter (<95ms after release) so single taps never double-trigger
+      if (!touch.isPressed && (now - touch.lastReleaseTime) >= 95) {
+        if (touch.tapCount == 1 && (now - touch.firstTapTime) <= 420) {
+          handleScreenDoubleTap(); // Toggles Screen 0 <-> Screen 1 Diagnostics
+        } else {
+          touch.isPressed = true;
+        }
+      } else if (held > 1200) {
+        handleScreenLongPress(); // Cycles display brightness
+      }
+    } else if (touch.isPressed && ++touch.releaseZeroCount >= 2) { // 40ms confirm
+      touch.isPressed = false;
+      touch.tapCount = 1;
     }
   }
+  if (touch.tapCount == 1 && !touch.isPressed && (now - touch.firstTapTime >= 420)) {
+    handleScreenSingleTap(); // TSL return, ETC/Promptside ACK, MIDI return, NMOS
+  }
 }`,
-    explanation: 'The Waveshare 1.69" module replaces the mechanical button with a CST816T capacitive touch screen. A single tap triggers the exact mode-aware button action (including MIDI button return, Promptside/ETC/OSC CueLight ACK, and TSL cues), while a double tap switches between Screen 0 and Screen 1 Diagnostics.'
+    explanation: 'The Waveshare 1.69" module replaces the mechanical button with a CST816T capacitive touch screen. A 2-frame (40ms) release filter and 95ms inter-tap bounce guard prevent capacitive lift chatter from firing false double-taps, keeping Single Tap crisp and Double Tap deliberate.'
   },
   {
     category: 'Battery Charge Level & Status Readout',
@@ -125,23 +131,21 @@ void readBatteryState() {
     explanation: 'The Olimex ESP32-PoE2 includes an onboard Microchip MCP73831 LiPo charger with ADC battery voltage monitoring on GPIO 35. The firmware calculates calibrated battery voltage, percentage (0-100%), and power rail status on Screen 0, Screen 1, the Web UI, and /api/battery.'
   },
   {
-    category: 'Display Resolution & LovyanGFX DMA Double Buffering',
+    category: 'Display Resolution, RGB Order & Anti-Flicker Buffering',
     original: `// M5AtomS3R: 128x128 GC9107 Color LCD via M5GFX
 M5Canvas canvas(&M5.Display);
 canvas.createSprite(128, 128); // 32 KB buffer`,
     adapted: `// Waveshare 1.69": 240x280 ST7789V2 IPS LCD via LovyanGFX
+// cfg.invert = true; cfg.rgb_order = true; (RGB subpixel order -> Red stays Red!)
 LGFX lcd;
-LGFX_Sprite canvas(&lcd);
-// 240 x 280 x 2 bytes = 134,400 bytes allocated in ESP32 SRAM
-bool useDoubleBuffer = canvas.createSprite(LCD_WIDTH, LCD_HEIGHT);
+LGFX_Sprite canvas(&lcd);       // 16-bit PSRAM (134KB) or 8-bit SRAM (67KB) fallback
+LGFX_Sprite headerCanvas(&lcd); // 17KB 16-bit top-banner sprite for 1Hz clock/battery
 
-void renderScreen() {
-  canvas.fillScreen(bgColor);
-  drawHeaderWithBatteryAndClock(&canvas); // Clock or MTC + Battery %/V
-  drawTallyContent(&canvas);
-  canvas.pushSprite(0, 0); // Atomic SPI DMA blit to ST7789V2
+void renderClockTick() {
+  drawTopBannerWidget(&headerCanvas, 0, 0, W - 16, 38, bgColor, true);
+  headerCanvas.pushSprite(8, 8); // Zero-flicker 1Hz clock & battery refresh
 }`,
-    explanation: 'The Waveshare 1.69" IPS panel provides a 240x280 rounded-corner display driven by LovyanGFX LGFX_Sprite double-buffering (134.4 KB) with a direct-draw fallback if heap is fragmented.'
+    explanation: 'Uses cfg.rgb_order = true for accurate RGB color reproduction on the ST7789V2 IPS panel, 16-bit PSRAM / 8-bit internal SRAM full-frame sprite fallback, and a dedicated 17 KB top-banner sprite so 1-second clock & battery updates never erase or flicker the screen.'
   },
   {
     category: 'Ethernet Architecture: LAN8720A RMII vs W5500 SPI',

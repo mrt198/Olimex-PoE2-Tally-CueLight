@@ -7,7 +7,7 @@ Broadcast tally and theatrical cue light firmware adapted specifically for the *
 ## 🌟 Key Adaptations for Olimex ESP32-PoE2 & Waveshare 1.69" Touch
 
 ### 1. Touch Gesture Navigation (Replacing Mechanical Button)
-The Waveshare 1.69" module features an onboard **CST816T capacitive touch controller** connected over I2C (`SDA: GPIO 33`, `SCL: GPIO 32`, `INT: GPIO 34`, `RST: GPIO 5`):
+The Waveshare 1.69" module features an onboard **CST816T capacitive touch controller** connected over I2C (`SDA: GPIO 33`, `SCL: GPIO 32`, `INT: GPIO 34`, `RST: GPIO 4` shared with LCD RST):
 * **Single Tap on Screen:** Exact equivalent of clicking the physical button.
   * In **TP Mode:** Toggles Channel 1 Program TSL return cue (`sendtally(1, state)`).
   * In **Presenter Mode:** Toggles Channel 1 Preview TSL return cue (`0x31`).
@@ -44,7 +44,7 @@ The Olimex ESP32-PoE2 includes an onboard **Microchip MCP73831 LiPo battery char
 * **Screen:** 1.69" 240×280 pixel IPS LCD with ST7789V2 controller.
 * **Buffer Size:** $240 \times 280 \times 2\text{ bytes} = 134{,}400\text{ bytes } (\approx 134\text{ KB})$.
 * Composed completely in off-screen RAM and blitted to the display via SPI DMA burst for 100% flicker-free transitions.
-* **SPI Pinout:** MOSI: `GPIO 13`, SCLK: `GPIO 14`, CS: `GPIO 15`, DC: `GPIO 2`, RST: `GPIO 4`, BL: `GPIO 21`.
+* **SPI Pinout:** MOSI: `GPIO 13`, SCLK: `GPIO 14`, CS: `GPIO 15`, DC: `GPIO 2`, RST: `GPIO 4`, BL: `GPIO 5` (GPIO 21 is reserved for `EMAC_TX_EN`).
 
 ---
 
@@ -56,16 +56,17 @@ The Olimex ESP32-PoE2 includes an onboard **Microchip MCP73831 LiPo battery char
 | **Ethernet** | MDIO | **GPIO 18** | LAN8720A Management Data I/O |
 | **Ethernet** | Power | **GPIO 12** | LAN8720A Power Enable |
 | **Ethernet** | Clock (50MHz) | **GPIO 0** | External 50MHz oscillator input |
+| **Ethernet** | RMII Data / TX_EN | **GPIO 19, 21, 22, 25, 26, 27** | Internal EMAC (Reserved — do not reuse) |
 | **Display SPI** | MOSI / SDA | **GPIO 13** | ST7789V2 SPI Data Out |
 | **Display SPI** | SCLK / SCK | **GPIO 14** | ST7789V2 SPI Clock |
 | **Display SPI** | CS | **GPIO 15** | ST7789V2 Chip Select |
 | **Display SPI** | DC / RS | **GPIO 2** | ST7789V2 Data / Command |
-| **Display SPI** | RST | **GPIO 4** | ST7789V2 Hardware Reset |
-| **Display PWM** | BL (Backlight) | **GPIO 21** | PWM Brightness Control (0-255) |
+| **Display SPI** | RST | **GPIO 4** | ST7789V2 Hardware Reset (Shared with Touch RST) |
+| **Display PWM** | BL (Backlight) | **GPIO 5** | PWM Brightness Control (0-255) |
 | **Touch I2C** | SDA | **GPIO 33** | CST816T Capacitive Touch Data |
 | **Touch I2C** | SCL | **GPIO 32** | CST816T Capacitive Touch Clock |
 | **Touch INT** | INT | **GPIO 34** | CST816T Interrupt (Active LOW) |
-| **Touch RST** | RST | **GPIO 5** | CST816T Hardware Reset |
+| **Touch RST** | RST | **GPIO 4** | Shared Reset with LCD_RST (or wire to ESP_EN / `-1`) |
 | **Battery ADC** | V_BAT_SENSE | **GPIO 35** | ADC1_CH7 via 2:1 divider ($V_{\text{bat}} = V_{\text{adc}} \times 2$) |
 | **Power** | 5V / 3.3V / GND | Header | Powered via 802.3af PoE, USB, or LiPo |
 | **External ENV I2C** | SDA / SCL (Optional) | **GPIO 33 / GPIO 32** | Shared I2C bus for SHT30 (`0x44`) + BMP280 (`0x76`) |

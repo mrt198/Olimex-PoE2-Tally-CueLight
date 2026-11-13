@@ -153,14 +153,12 @@ export function UserManual() {
               <div className="text-sky-400 font-bold">// CST816T Touch Event Handler in Firmware:</div>
               <pre className="text-[11px] text-slate-300 overflow-x-auto">
 {`void processTouchEvents() {
-  if (digitalRead(PIN_TOUCH_INT) == LOW) {
-    uint8_t gesture = readCST816T();
-    if (gesture == GESTURE_SINGLE_TAP) {
-      handleScreenSingleTap(); // Button action equivalent
-    } else if (gesture == GESTURE_DOUBLE_TAP) {
-      currentScreen = (currentScreen == 0) ? 1 : 0; // Diagnostics toggle
-      renderScreen();
-    }
+  if (digitalRead(PIN_TOUCH_INT) == LOW || touch.isPressed) {
+    // Polls 0x01..0x06 every 20ms; requires 2 consecutive zero-point reads (~40ms)
+    // to confirm finger lift + 95ms inter-tap guard to prevent bounce double-taps:
+    // - Single Tap (420ms window) -> handleScreenSingleTap() (Button equivalent)
+    // - Double Tap (95..420ms)    -> handleScreenDoubleTap() (Screen 0 <-> Diag)
+    // - Long Press (>1.2s)        -> handleScreenLongPress() (Cycle Brightness)
   }
 }`}
               </pre>
@@ -610,9 +608,9 @@ Content-Type: application/json
                   </thead>
                   <tbody className="text-slate-300">
                     <tr><td className="p-1.5 border border-slate-700 font-mono">LCD MOSI / SCLK / CS</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-cyan-400">GPIO 13 / 14 / 15</td></tr>
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">LCD DC / RST / BL</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-cyan-400">GPIO 2 / 4 / 21</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">LCD DC / RST / BL</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-cyan-400">GPIO 2 / 4 / 5</td></tr>
                     <tr><td className="p-1.5 border border-slate-700 font-mono">I2C SDA / SCL (Touch+ENV)</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-emerald-400">GPIO 33 / GPIO 32</td></tr>
-                    <tr><td className="p-1.5 border border-slate-700 font-mono">Touch INT / RST</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-amber-400">GPIO 34 / GPIO 5</td></tr>
+                    <tr><td className="p-1.5 border border-slate-700 font-mono">Touch INT / RST</td><td className="p-1.5 border border-slate-700 font-mono font-bold text-amber-400">GPIO 34 / GPIO 4 (Shared)</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -704,7 +702,7 @@ Content-Type: application/json
                     <span>Display Auto-Dimming &amp; Instant Wake</span>
                   </div>
                   <p className="text-slate-300 leading-relaxed">
-                    The Waveshare ST7789V2 backlight (GPIO 21) dims to 10% PWM when idle in Standby/Off past the configured timeout (default: 60s). Any incoming tally/cue packet or capacitive touch on the CST816T restores 100% brightness in 0ms. Battery &amp; power telemetry are exposed at <code>GET /api/battery</code> and <code>GET /api/power</code>.
+                    The Waveshare ST7789V2 backlight (GPIO 5 — since GPIO 21 is used by <code>EMAC_TX_EN</code>) dims to 10% PWM when idle in Standby/Off past the configured timeout (default: 60s). Any incoming tally/cue packet or capacitive touch on the CST816T restores 100% brightness in 0ms. Battery &amp; power telemetry are exposed at <code>GET /api/battery</code> and <code>GET /api/power</code>.
                   </p>
                 </div>
               </div>

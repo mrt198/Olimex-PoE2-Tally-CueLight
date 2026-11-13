@@ -46,14 +46,14 @@
  *   - LCD SCLK : GPIO 14
  *   - LCD CS   : GPIO 15
  *   - LCD DC   : GPIO 2
- *   - LCD RST  : GPIO 4
- *   - LCD BL   : GPIO 21 (Backlight PWM)
+ *   - LCD RST  : GPIO 4  (Shared reset with Touch RST)
+ *   - LCD BL   : GPIO 5  (Backlight PWM; GPIO 21 is reserved for EMAC_TX_EN!)
  *   - Touch SDA: GPIO 33 (Shared I2C SDA)
  *   - Touch SCL: GPIO 32 (Shared I2C SCL)
  *   - Touch INT: GPIO 34 (Active LOW interrupt)
- *   - Touch RST: GPIO 5
+ *   - Touch RST: GPIO 4  (Shared with LCD RST, or wire TP_RST to ESP_EN & set -1)
  *   - Battery  : GPIO 35 (ADC1_CH7 via 2:1 divider: V_bat = V_adc * 2)
- *   - LAN8720A : PHY_ADDR=0, MDC=23, MDIO=18, POWER=12, CLK=GPIO0_IN
+ *   - LAN8720A : PHY_ADDR=0, MDC=23, MDIO=18, POWER=12, CLK=GPIO0_IN, TX_EN=21
  */
 
 #include <Arduino.h>
@@ -109,7 +109,7 @@
 #define PIN_LCD_RST 4
 #endif
 #ifndef PIN_LCD_BL
-#define PIN_LCD_BL 21
+#define PIN_LCD_BL 5  // Note: GPIO 21 is EMAC_TX_EN on Olimex ESP32-PoE2
 #endif
 
 // Waveshare CST816T Capacitive Touch (I2C)
@@ -123,7 +123,7 @@
 #define PIN_TOUCH_INT 34
 #endif
 #ifndef PIN_TOUCH_RST
-#define PIN_TOUCH_RST 5
+#define PIN_TOUCH_RST 4  // Shared with PIN_LCD_RST (or set -1 if wired to ESP_EN)
 #endif
 #ifndef CST816T_I2C_ADDR
 #define CST816T_I2C_ADDR 0x15
@@ -205,7 +205,7 @@ public:
       cfg.dummy_read_bits  = 1;
       cfg.readable         = false;
       cfg.invert           = true;
-      cfg.rgb_order        = false;
+      cfg.rgb_order        = true; // Waveshare 1.69" ST7789V2 IPS uses RGB subpixel order (fixes Red/Blue swap)
       cfg.dlen_16bit       = false;
       cfg.bus_shared       = false;
       _panel_instance.config(cfg);
@@ -225,7 +225,20 @@ public:
 
 LGFX lcd;
 LGFX_Sprite canvas(&lcd);
+LGFX_Sprite headerCanvas(&lcd);
 bool doubleBufferEnabled = false;
+bool headerBufferEnabled = false;
+uint8_t doubleBufferColorDepth = 0;
+
+// Cached render state to prevent unnecessary full-screen erasures / 1 Hz flicker
+bool screenHasRenderedOnce = false;
+int lastRenderedScreen = -1;
+uint16_t lastRenderedBgColor = 0xFFFF;
+uint16_t lastRenderedTextColor = 0xFFFF;
+String lastRenderedStatus = "";
+String lastRenderedBatteryStatus = "";
+bool lastRenderedBatteryPoE = false;
+bool lastRenderedBatteryLow = false;
 
 // ==========================================
 // TSL 3.1 Definitions & Protocol Settings
@@ -299,13 +312,17 @@ struct TouchState {
   uint8_t gesture;
   unsigned long lastPressTime;
   unsigned long lastReleaseTime;
+  unsigned long lastSeenTouchTime;
   uint8_t tapCount;
   unsigned long firstTapTime;
+  unsigned long cooldownUntil;
+  uint8_t releaseZeroCount;
+  bool suppressUntilRelease;
   bool longPressHandled;
   bool emergencyResetHandled;
 };
 
-TouchState touch = {false, 0, 0, 0, 0, 0, 0, 0, false, false};
+TouchState touch = {false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, false, false};
 
 // ETC CueSystem Settings
 String cuesystem_host           = "192.168.1.100";
@@ -521,6 +538,7 @@ void evaluateMode();
 void showSettings();
 void showDeviceInfo();
 void renderScreen();
+void renderClockTick();
 void updateBrightness();
 void connectToServer();
 void disconnectFromServer();
@@ -628,102 +646,170 @@ void readBatteryState() {
 // ==========================================
 // CST816T Capacitive Touch Driver (I2C GPIO 33/32)
 // ==========================================
+#define TOUCH_POLL_INTERVAL_MS      20
+#define TOUCH_RELEASE_CONFIRM_POLLS 2    // Require 2 consecutive points==0 reads (~40ms) to ignore lift chatter
+#define TOUCH_MIN_INTERTAP_GAP_MS   95   // Minimum ms after release before Tap 2 can start (blocks bounce)
+#define TOUCH_DOUBLE_TAP_WINDOW_MS  420  // Max ms from Tap 1 release to Tap 2 press
+#define TOUCH_COOLDOWN_MS           320  // Lockout after Double-Tap or Long-Press completes
+
 void initCST816TTouch() {
   Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL, 400000);
   pinMode(PIN_TOUCH_INT, INPUT);
-  pinMode(PIN_TOUCH_RST, OUTPUT);
+  // Only pulse Touch RST separately if not sharing GPIO 4 with LCD_RST (lcd.init() already pulsed GPIO 4)
+  if (PIN_TOUCH_RST >= 0 && PIN_TOUCH_RST != PIN_LCD_RST) {
+    pinMode(PIN_TOUCH_RST, OUTPUT);
+    digitalWrite(PIN_TOUCH_RST, LOW);
+    delay(10);
+    digitalWrite(PIN_TOUCH_RST, HIGH);
+    delay(50);
+  }
 
-  digitalWrite(PIN_TOUCH_RST, LOW);
-  delay(10);
-  digitalWrite(PIN_TOUCH_RST, HIGH);
-  delay(50);
+  // Probe CST816T Chip ID register (0xA7) for diagnostics
+  uint8_t chipId = 0;
+  Wire.beginTransmission(CST816T_I2C_ADDR);
+  Wire.write(0xA7);
+  if (Wire.endTransmission() == 0 && Wire.requestFrom((uint8_t)CST816T_I2C_ADDR, (size_t)1) == 1) {
+    chipId = Wire.read();
+  }
 
-  logger("[TOUCH] CST816T Initialized on I2C pins SDA=33, SCL=32, INT=34, RST=5", "info");
+  logger(String("[TOUCH] CST816T Initialized SDA=") + PIN_TOUCH_SDA +
+         " SCL=" + PIN_TOUCH_SCL + " INT=" + PIN_TOUCH_INT + " RST=" + PIN_TOUCH_RST +
+         " ChipID=0x" + String(chipId, HEX), "info");
 }
 
 void processTouchEvents() {
   static unsigned long lastPollTime = 0;
   unsigned long now = millis();
 
-  if (digitalRead(PIN_TOUCH_INT) == LOW) {
-    if (now - lastPollTime >= 15) {
+  // Poll when INT is active LOW OR while a touch press is active (INT may pulse briefly)
+  if (digitalRead(PIN_TOUCH_INT) == LOW || touch.isPressed) {
+    if (now - lastPollTime >= TOUCH_POLL_INTERVAL_MS) {
       lastPollTime = now;
+      bool readOk = false;
+      uint8_t gesture = 0;
+      uint8_t points = 0;
+      uint16_t x = 0;
+      uint16_t y = 0;
+
       Wire.beginTransmission(CST816T_I2C_ADDR);
       Wire.write(0x01);
       if (Wire.endTransmission() == 0) {
-        Wire.requestFrom((uint8_t)CST816T_I2C_ADDR, (size_t)6);
-        if (Wire.available() >= 6) {
-          uint8_t gesture = Wire.read();
-          uint8_t points  = Wire.read();
-          uint8_t xHigh   = Wire.read();
-          uint8_t xLow    = Wire.read();
-          uint8_t yHigh   = Wire.read();
-          uint8_t yLow    = Wire.read();
-
-          uint16_t x = ((xHigh & 0x0F) << 8) | xLow;
-          uint16_t y = ((yHigh & 0x0F) << 8) | yLow;
-
-          if (points > 0) {
-            if (!touch.isPressed) {
-              touch.isPressed = true;
-              touch.lastPressTime = now;
-              touch.x = x;
-              touch.y = y;
-              touch.gesture = gesture;
-              touch.longPressHandled = false;
-              touch.emergencyResetHandled = false;
-              wakeDisplayFromDim();
-            } else {
-              unsigned long held = now - touch.lastPressTime;
-              if (held > 7000 && !touch.emergencyResetHandled) {
-                touch.emergencyResetHandled = true;
-                logger("[Touch] Emergency Hold (>7s): Resetting & Rebooting...", "error");
-                if (doubleBufferEnabled) {
-                  canvas.fillScreen(TFT_RED);
-                  canvas.setTextColor(TFT_WHITE, TFT_RED);
-                  canvas.setTextDatum(middle_center);
-                  canvas.setTextSize(2);
-                  canvas.drawString("RESETTING...", canvas.width() / 2, canvas.height() / 2);
-                  canvas.pushSprite(0, 0);
-                } else {
-                  lcd.fillScreen(TFT_RED);
-                }
-                delay(1000);
-                ESP.restart();
-              } else if (held > 1200 && !touch.longPressHandled) {
-                touch.longPressHandled = true;
-                touch.tapCount = 0;
-                handleScreenLongPress();
-              }
-            }
-          }
+        if (Wire.requestFrom((uint8_t)CST816T_I2C_ADDR, (size_t)6) >= 6) {
+          gesture       = Wire.read();
+          points        = Wire.read();
+          uint8_t xHigh = Wire.read();
+          uint8_t xLow  = Wire.read();
+          uint8_t yHigh = Wire.read();
+          uint8_t yLow  = Wire.read();
+          x = ((xHigh & 0x0F) << 8) | xLow;
+          y = ((yHigh & 0x0F) << 8) | yLow;
+          readOk = true;
         }
       }
-    }
-  } else if (touch.isPressed) {
-    touch.isPressed = false;
-    touch.lastReleaseTime = now;
 
-    if (touch.longPressHandled || touch.emergencyResetHandled) {
-      return;
-    }
+      if (readOk) {
+        bool fingerPresent = (points >= 1 && points <= 2);
 
-    if (touch.tapCount == 0) {
-      touch.tapCount = 1;
-      touch.firstTapTime = now;
-    } else if (touch.tapCount == 1) {
-      if (now - touch.firstTapTime < 350) {
-        touch.tapCount = 0;
-        handleScreenDoubleTap();
-        return;
-      } else {
-        touch.tapCount = 1;
-        touch.firstTapTime = now;
+        if (fingerPresent) {
+          touch.releaseZeroCount = 0;
+          touch.lastSeenTouchTime = now;
+
+          if (!touch.isPressed) {
+            // Ignore any touch during post-action cooldown
+            if (now < touch.cooldownUntil) {
+              return;
+            }
+            // Reject capacitive lift-off bounce (< 95ms after release) so a single tap never double-triggers
+            if (touch.lastReleaseTime > 0 && (now - touch.lastReleaseTime) < TOUCH_MIN_INTERTAP_GAP_MS) {
+              return;
+            }
+
+            // Second valid press inside double-tap window -> Double Tap!
+            if (touch.tapCount == 1 && (now - touch.firstTapTime) <= TOUCH_DOUBLE_TAP_WINDOW_MS) {
+              touch.tapCount = 0;
+              touch.isPressed = true;
+              touch.suppressUntilRelease = true;
+              touch.longPressHandled = false;
+              touch.emergencyResetHandled = false;
+              touch.cooldownUntil = now + TOUCH_COOLDOWN_MS;
+              handleScreenDoubleTap();
+              return;
+            }
+
+            // Fresh first press
+            touch.isPressed = true;
+            touch.suppressUntilRelease = false;
+            touch.lastPressTime = now;
+            touch.x = x;
+            touch.y = y;
+            touch.gesture = gesture;
+            touch.longPressHandled = false;
+            touch.emergencyResetHandled = false;
+            wakeDisplayFromDim();
+          } else if (!touch.suppressUntilRelease) {
+            unsigned long held = now - touch.lastPressTime;
+            if (held > 7000 && !touch.emergencyResetHandled) {
+              touch.emergencyResetHandled = true;
+              touch.suppressUntilRelease = true;
+              touch.tapCount = 0;
+              touch.cooldownUntil = now + TOUCH_COOLDOWN_MS;
+              logger("[Touch] Emergency Hold (>7s): Resetting & Rebooting...", "error");
+              if (doubleBufferEnabled) {
+                canvas.fillScreen(TFT_RED);
+                canvas.setTextColor(TFT_WHITE, TFT_RED);
+                canvas.setTextDatum(middle_center);
+                canvas.setTextSize(2);
+                canvas.drawString("RESETTING...", canvas.width() / 2, canvas.height() / 2);
+                canvas.pushSprite(0, 0);
+              } else {
+                lcd.fillScreen(TFT_RED);
+              }
+              delay(1000);
+              ESP.restart();
+            } else if (held > 1200 && !touch.longPressHandled) {
+              touch.longPressHandled = true;
+              touch.suppressUntilRelease = true;
+              touch.tapCount = 0;
+              touch.cooldownUntil = now + TOUCH_COOLDOWN_MS;
+              handleScreenLongPress();
+            }
+          }
+        } else if (touch.isPressed) {
+          // points == 0: Require sustained release to filter capacitive contact chatter
+          touch.releaseZeroCount++;
+          if (touch.releaseZeroCount >= TOUCH_RELEASE_CONFIRM_POLLS) {
+            touch.isPressed = false;
+            touch.releaseZeroCount = 0;
+            touch.lastReleaseTime = now;
+
+            if (touch.suppressUntilRelease || touch.longPressHandled || touch.emergencyResetHandled) {
+              touch.suppressUntilRelease = false;
+              touch.cooldownUntil = now + TOUCH_COOLDOWN_MS;
+              return;
+            }
+
+            touch.tapCount = 1;
+            touch.firstTapTime = now;
+          }
+        }
+      } else if (touch.isPressed && digitalRead(PIN_TOUCH_INT) == HIGH && (now - touch.lastSeenTouchTime >= 60)) {
+        // I2C safety timeout release if INT returned HIGH
+        touch.isPressed = false;
+        touch.releaseZeroCount = 0;
+        touch.lastReleaseTime = now;
+        if (touch.suppressUntilRelease || touch.longPressHandled || touch.emergencyResetHandled) {
+          touch.suppressUntilRelease = false;
+          touch.cooldownUntil = now + TOUCH_COOLDOWN_MS;
+        } else {
+          touch.tapCount = 1;
+          touch.firstTapTime = now;
+        }
       }
     }
   }
 
-  if (touch.tapCount == 1 && (now - touch.firstTapTime >= 350)) {
+  // Commit Single Tap once double-tap window elapses cleanly after finger lift
+  if (touch.tapCount == 1 && !touch.isPressed && (now - touch.firstTapTime >= TOUCH_DOUBLE_TAP_WINDOW_MS)) {
     touch.tapCount = 0;
     handleScreenSingleTap();
   }
@@ -796,17 +882,44 @@ void handleScreenLongPress() {
 }
 
 // ==========================================
-// Display Double Buffer Helper
+// Display Double Buffer Helper (16-bit PSRAM -> 8-bit SRAM + 17KB Header Sprite)
 // ==========================================
 void initDoubleBuffer() {
   canvas.deleteSprite();
+  headerCanvas.deleteSprite();
+  doubleBufferEnabled = false;
+  headerBufferEnabled = false;
+  doubleBufferColorDepth = 0;
+  screenHasRenderedOnce = false;
+
+  int w = lcd.width();
+  int h = lcd.height();
+
+  // Tier 1: Full 16-bit sprite (uses PSRAM on WROVER when enabled, or SRAM if contiguous block available)
+  canvas.setPsram(psramFound());
   canvas.setColorDepth(16);
-  if (canvas.createSprite(lcd.width(), lcd.height()) != nullptr) {
+  if (canvas.createSprite(w, h) != nullptr) {
     doubleBufferEnabled = true;
-    logger(String("[Display] Double buffer allocated (") + String(lcd.width()) + "x" + String(lcd.height()) + " = " + String((lcd.width() * lcd.height() * 2) / 1024) + " KB).", "info");
+    doubleBufferColorDepth = 16;
+    logger(String("[Display] 16-bit Double buffer allocated (") + String(w) + "x" + String(h) + " = " + String((w * h * 2) / 1024) + " KB).", "info");
   } else {
-    doubleBufferEnabled = false;
-    logger("[Display] WARNING: Double buffer allocation failed; using direct SPI rendering.", "error");
+    // Tier 2: 8-bit RGB332 full-frame sprite (~67.2 KB fits cleanly in ESP32 internal SRAM without PSRAM)
+    canvas.setPsram(false);
+    canvas.setColorDepth(8);
+    if (canvas.createSprite(w, h) != nullptr) {
+      doubleBufferEnabled = true;
+      doubleBufferColorDepth = 8;
+      logger(String("[Display] 8-bit Double buffer allocated in SRAM (") + String(w) + "x" + String(h) + " = " + String((w * h) / 1024) + " KB).", "info");
+    } else {
+      logger("[Display] WARNING: Full double buffer failed; using partial header sprite + direct rendering.", "error");
+    }
+  }
+
+  // Lightweight 16-bit top-banner sprite (~17 KB) for flicker-free 1 Hz clock & battery updates
+  headerCanvas.setPsram(false);
+  headerCanvas.setColorDepth(16);
+  if (headerCanvas.createSprite(w - 16, 38) != nullptr) {
+    headerBufferEnabled = true;
   }
 }
 
@@ -1435,7 +1548,7 @@ void processRTPMidiPacket(uint8_t* buf, int len, IPAddress remoteIP, uint16_t re
         snprintf(tcBuf, sizeof(tcBuf), "%02d:%02d:%02d:%02d", hours, minutes, seconds, frames);
         mtc_timecode_str = String(tcBuf);
         lastMTCTime = millis();
-        if (mtc_reader_enabled && currentScreen == 0) renderScreen();
+        if (mtc_reader_enabled && currentScreen == 0) renderClockTick();
       }
       i += 1;
     } else if (b == 0xF0 && i + 8 < len && buf[i+1] == 0x7F && buf[i+3] == 0x01 && buf[i+4] == 0x01) {
@@ -1449,7 +1562,7 @@ void processRTPMidiPacket(uint8_t* buf, int len, IPAddress remoteIP, uint16_t re
       snprintf(tcBuf, sizeof(tcBuf), "%02d:%02d:%02d:%02d", hours, minutes, seconds, frames);
       mtc_timecode_str = String(tcBuf);
       lastMTCTime = millis();
-      if (mtc_reader_enabled && currentScreen == 0) renderScreen();
+      if (mtc_reader_enabled && currentScreen == 0) renderClockTick();
       i += 8;
     }
   }
@@ -1828,12 +1941,62 @@ void processMSCRTPMidiPacket(uint8_t* buf, int len, IPAddress remoteIP, uint16_t
 // ==========================================
 // Double-Buffered 240x280 Screen Rendering Engine
 // ==========================================
-void renderScreen() {
-  readBatteryState();
+void drawTopBannerWidget(LovyanGFX* g, int originX, int originY, int boxW, int boxH, uint16_t surroundBg, bool isStandaloneSprite) {
+  // Fill rounded-corner outer margin with surrounding bgColor when drawing into standalone headerCanvas
+  if (isStandaloneSprite) {
+    g->fillScreen(surroundBg);
+  }
+  g->fillRoundRect(originX, originY, boxW, boxH, 8, TFT_BLACK);
+  g->drawRoundRect(originX, originY, boxW, boxH, 8, mtc_reader_enabled ? TFT_CYAN : (isPromptside() ? TFT_MAGENTA : TFT_DARKGRAY));
 
-  uint16_t bgColor = TFT_BLACK;
-  uint16_t textColor = TFT_WHITE;
-  String statusLabel = "STANDBY";
+  if (mtc_reader_enabled) {
+    g->setTextDatum(middle_left);
+    g->setTextSize(2);
+    g->setTextColor(TFT_CYAN, TFT_BLACK);
+    g->drawString(mtc_timecode_str, originX + 8, originY + 19);
+  } else if (isPromptside()) {
+    g->setTextDatum(middle_left);
+    g->setTextSize(1);
+    g->setTextColor(TFT_MAGENTA, TFT_BLACK);
+    g->drawString(promptside_wing_label.substring(0, 18), originX + 8, originY + 19);
+  } else if (isOSCCueLight()) {
+    g->setTextDatum(middle_left);
+    g->setTextSize(1);
+    g->setTextColor(TFT_CYAN, TFT_BLACK);
+    g->drawString(osccue_banner.substring(0, 18), originX + 8, originY + 19);
+  } else {
+    time_t now;
+    time(&now);
+    struct tm timeinfo;
+    char timeStr[12] = "--:--:--";
+    if (now > 100000) {
+      localtime_r(&now, &timeinfo);
+      strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
+    } else {
+      unsigned long totalSecs = millis() / 1000;
+      snprintf(timeStr, sizeof(timeStr), "%02lu:%02lu:%02lu", (totalSecs / 3600) % 24, (totalSecs / 60) % 60, totalSecs % 60);
+    }
+    g->setTextDatum(middle_left);
+    g->setTextSize(2);
+    g->setTextColor(TFT_WHITE, TFT_BLACK);
+    g->drawString(timeStr, originX + 8, originY + 19);
+  }
+
+  // Top-Right Battery Readout (% + Voltage + Charging Indicator)
+  uint16_t batColor = battery.isLow ? TFT_RED : (battery.isCharging ? TFT_YELLOW : TFT_GREEN);
+  g->setTextDatum(top_right);
+  g->setTextSize(1);
+  g->setTextColor(batColor, TFT_BLACK);
+  String pctStr = String(battery.isCharging ? "+" : "") + String(battery.percentage) + "%";
+  g->drawString(pctStr, originX + boxW - 8, originY + 5);
+  g->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  g->drawString(String(battery.voltage, 2) + "V", originX + boxW - 8, originY + 18);
+}
+
+void computeTallyVisualState(uint16_t& bgColor, uint16_t& textColor, String& statusLabel) {
+  bgColor = TFT_BLACK;
+  textColor = TFT_WHITE;
+  statusLabel = "STANDBY";
   bool flashPhase = (millis() / 400) % 2 == 0;
 
   if (isP2PMode() && p2p_disconnected_state) {
@@ -1942,62 +2105,79 @@ void renderScreen() {
     statusLabel.replace("\"", "");
     statusLabel.toUpperCase();
   }
+}
 
-  auto renderContent = [&](LovyanGFX* g) {
+void renderClockTick() {
+  readBatteryState();
+  uint16_t bgColor, textColor;
+  String statusLabel;
+  computeTallyVisualState(bgColor, textColor, statusLabel);
+
+  // If background, screen, or mode state changed, perform a full render
+  if (!screenHasRenderedOnce || currentScreen != lastRenderedScreen || bgColor != lastRenderedBgColor || statusLabel != lastRenderedStatus) {
+    renderScreen();
+    return;
+  }
+
+  if (currentScreen == 0) {
+    int W = lcd.width();
+    int H = lcd.height();
+
+    // Update ONLY the 17 KB top banner (clock / MTC + battery %) -> zero full-screen SPI flicker!
+    if (headerBufferEnabled) {
+      drawTopBannerWidget(&headerCanvas, 0, 0, W - 16, 38, bgColor, true);
+      headerCanvas.pushSprite(8, 8);
+    } else {
+      lcd.startWrite();
+      drawTopBannerWidget(&lcd, 8, 8, W - 16, 38, bgColor, false);
+      lcd.endWrite();
+    }
+
+    // Update middle battery power pill ONLY when charging/PoE/low-battery status changes
+    if (battery.status != lastRenderedBatteryStatus ||
+        battery.isPoE != lastRenderedBatteryPoE ||
+        battery.isLow != lastRenderedBatteryLow) {
+      lastRenderedBatteryStatus = battery.status;
+      lastRenderedBatteryPoE = battery.isPoE;
+      lastRenderedBatteryLow = battery.isLow;
+      int centerY = H / 2 - 22;
+      lcd.startWrite();
+      lcd.setTextSize(1);
+      lcd.fillRoundRect(16, centerY + 68, W - 32, 20, 10, TFT_BLACK);
+      lcd.setTextDatum(middle_center);
+      lcd.setTextColor(battery.isLow ? TFT_RED : TFT_CYAN, TFT_BLACK);
+      lcd.drawString((battery.isPoE ? "PoE 802.3af | " : "LiPo | ") + battery.status, W / 2, centerY + 78);
+      lcd.endWrite();
+    }
+  } else {
+    // Diagnostics screen: only redraw atomically if sprite buffered (avoids 1 Hz direct fillScreen blink)
+    if (doubleBufferEnabled) {
+      renderScreen();
+    }
+  }
+}
+
+void renderScreen() {
+  readBatteryState();
+
+  uint16_t bgColor, textColor;
+  String statusLabel;
+  computeTallyVisualState(bgColor, textColor, statusLabel);
+
+  bool backgroundChanged = (!screenHasRenderedOnce || currentScreen != lastRenderedScreen || bgColor != lastRenderedBgColor);
+
+  auto renderContent = [&](LovyanGFX* g, bool clearFullBg) {
     int W = g->width();
     int H = g->height();
-    g->fillScreen(bgColor);
+    if (clearFullBg) {
+      g->fillScreen(bgColor);
+    }
 
     if (currentScreen == 0) {
       // ----------------------------------------
       // Screen 0: Main Tally & Cue Display (240x280)
       // ----------------------------------------
-      // Top Banner: Clock / MTC / Wing Banner (Left) + Battery Readout (Right)
-      g->fillRoundRect(8, 8, W - 16, 38, 8, TFT_BLACK);
-      g->drawRoundRect(8, 8, W - 16, 38, 8, mtc_reader_enabled ? TFT_CYAN : (isPromptside() ? TFT_MAGENTA : TFT_DARKGRAY));
-
-      if (mtc_reader_enabled) {
-        g->setTextDatum(middle_left);
-        g->setTextSize(2);
-        g->setTextColor(TFT_CYAN, TFT_BLACK);
-        g->drawString(mtc_timecode_str, 16, 27);
-      } else if (isPromptside()) {
-        g->setTextDatum(middle_left);
-        g->setTextSize(1);
-        g->setTextColor(TFT_MAGENTA, TFT_BLACK);
-        g->drawString(promptside_wing_label.substring(0, 18), 16, 27);
-      } else if (isOSCCueLight()) {
-        g->setTextDatum(middle_left);
-        g->setTextSize(1);
-        g->setTextColor(TFT_CYAN, TFT_BLACK);
-        g->drawString(osccue_banner.substring(0, 18), 16, 27);
-      } else {
-        time_t now;
-        time(&now);
-        struct tm timeinfo;
-        char timeStr[12] = "--:--:--";
-        if (now > 100000) {
-          localtime_r(&now, &timeinfo);
-          strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
-        } else {
-          unsigned long totalSecs = millis() / 1000;
-          snprintf(timeStr, sizeof(timeStr), "%02lu:%02lu:%02lu", (totalSecs / 3600) % 24, (totalSecs / 60) % 60, totalSecs % 60);
-        }
-        g->setTextDatum(middle_left);
-        g->setTextSize(2);
-        g->setTextColor(TFT_WHITE, TFT_BLACK);
-        g->drawString(timeStr, 16, 27);
-      }
-
-      // Top-Right Battery Readout (% + Voltage + Charging Indicator)
-      uint16_t batColor = battery.isLow ? TFT_RED : (battery.isCharging ? TFT_YELLOW : TFT_GREEN);
-      g->setTextDatum(top_right);
-      g->setTextSize(1);
-      g->setTextColor(batColor, TFT_BLACK);
-      String pctStr = String(battery.isCharging ? "+" : "") + String(battery.percentage) + "%";
-      g->drawString(pctStr, W - 16, 13);
-      g->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-      g->drawString(String(battery.voltage, 2) + "V", W - 16, 26);
+      drawTopBannerWidget(g, 8, 8, W - 16, 38, bgColor, false);
 
       // Center Label / Station / Cue Text
       String displayName = DeviceName;
@@ -2018,6 +2198,9 @@ void renderScreen() {
       }
 
       int centerY = H / 2 - 22;
+      if (!clearFullBg) {
+        g->fillRect(0, 52, W, centerY + 62 - 52, bgColor);
+      }
       g->setTextSize(3);
       g->setTextColor(textColor, bgColor);
       int textWidth = g->textWidth(displayName.c_str());
@@ -2044,6 +2227,9 @@ void renderScreen() {
       g->drawString((battery.isPoE ? "PoE 802.3af | " : "LiPo | ") + battery.status, W / 2, centerY + 78);
 
       // Bottom Telemetry & Touch Guidance
+      if (!clearFullBg) {
+        g->fillRect(0, H - 58, W, 36, bgColor);
+      }
       g->drawLine(10, H - 56, W - 10, H - 56, textColor);
       g->setTextDatum(top_left);
       g->setTextColor(textColor, bgColor);
@@ -2095,12 +2281,16 @@ void renderScreen() {
       g->printf("Rail: %s | CPU: %d MHz %s", battery.isPoE ? "PoE 802.3af" : "LiPo/USB", cpu_freq_mhz, screen_dimmed ? "[DIM]" : "[ECO]");
 
       // Network & Protocol Telemetry
+      if (!clearFullBg) {
+        g->fillRect(0, 92, W, H - 116, bgColor);
+      }
       g->setTextColor(dTextColor, bgColor);
       int y = 96;
+      String bufDesc = doubleBufferEnabled ? (String(doubleBufferColorDepth) + "-bit DMA") : "Direct";
       g->setCursor(10, y);      g->println("Net:  " + getNetworkModeStr()); y += 15;
       g->setCursor(10, y);      g->println("IP:   " + getNetworkIPStr() + (useDHCP ? " (DHCP)" : " (Static)")); y += 15;
       g->setCursor(10, y);      g->println("Mode: " + operatingMode + " | Port: " + String(getActiveListenPort())); y += 15;
-      g->setCursor(10, y);      g->println("LCD:  ST7789V2 " + String(W) + "x" + String(H) + (doubleBufferEnabled ? " (DMA)" : " (Direct)")); y += 15;
+      g->setCursor(10, y);      g->println("LCD:  ST7789V2 " + String(W) + "x" + String(H) + " (" + bufDesc + ")"); y += 15;
       g->setCursor(10, y);      g->println("Touch: CST816T I2C (0x15) | Rot: " + String(currentRotation * 90) + "d"); y += 15;
 
       if (mtc_reader_enabled) {
@@ -2136,13 +2326,22 @@ void renderScreen() {
   };
 
   if (doubleBufferEnabled) {
-    renderContent(&canvas);
+    renderContent(&canvas, true);
     canvas.pushSprite(0, 0);
   } else {
     lcd.startWrite();
-    renderContent(&lcd);
+    renderContent(&lcd, backgroundChanged);
     lcd.endWrite();
   }
+
+  screenHasRenderedOnce = true;
+  lastRenderedScreen = currentScreen;
+  lastRenderedBgColor = bgColor;
+  lastRenderedTextColor = textColor;
+  lastRenderedStatus = statusLabel;
+  lastRenderedBatteryStatus = battery.status;
+  lastRenderedBatteryPoE = battery.isPoE;
+  lastRenderedBatteryLow = battery.isLow;
 }
 
 void evaluateMode() {
@@ -2228,7 +2427,7 @@ void setupWebServer() {
     html += F(")</strong> | IP: <strong>");
     html += getNetworkIPStr();
     html += F("</strong> | Buffer: <strong>");
-    html += doubleBufferEnabled ? "134KB DMA OK" : "Direct";
+    html += doubleBufferEnabled ? (String(doubleBufferColorDepth) + "-bit DMA OK") : (headerBufferEnabled ? "Header Sprite" : "Direct");
     html += F("</strong></p><p style='margin:4px 0;'>Battery (GPIO 35): <strong>");
     html += String(battery.voltage, 2) + "V (" + String(battery.percentage) + "%) — " + battery.status;
     html += F("</strong></p><p style='margin:4px 0;'>Power: <strong>CPU ");
@@ -3094,9 +3293,11 @@ void loop() {
     if (networkConnected && isTP()) sendtally(1, ch1state);
   }
 
-  if (secondChanged || tallyStateChanged) {
+  if (tallyStateChanged) {
     tallyStateChanged = false;
     renderScreen();
+  } else if (secondChanged) {
+    renderClockTick();
   }
 
   vTaskDelay(pdMS_TO_TICKS((isFlashing || isTicker) ? 1 : 2));

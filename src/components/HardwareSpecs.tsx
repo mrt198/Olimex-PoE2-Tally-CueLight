@@ -99,9 +99,9 @@ export const HardwareSpecs: React.FC = () => {
               <tr className="hover:bg-neutral-800/40">
                 <td className="py-3 px-3 font-bold text-emerald-400">ST7789V2 LCD (SPI)</td>
                 <td className="py-3 px-3 font-semibold text-white">BL (Backlight PWM)</td>
-                <td className="py-3 px-3 font-bold text-emerald-300 bg-neutral-950/60 rounded">GPIO 21</td>
-                <td className="py-3 px-3 text-purple-300">-D PIN_LCD_BL=21</td>
-                <td className="py-3 px-3 text-neutral-400">LED PWM brightness control (0–255)</td>
+                <td className="py-3 px-3 font-bold text-emerald-300 bg-neutral-950/60 rounded">GPIO 5</td>
+                <td className="py-3 px-3 text-purple-300">-D PIN_LCD_BL=5</td>
+                <td className="py-3 px-3 text-neutral-400">LED PWM brightness control (GPIO 21 reserved for EMAC_TX_EN)</td>
               </tr>
 
               {/* Waveshare CST816T Touch (I2C) */}
@@ -129,9 +129,9 @@ export const HardwareSpecs: React.FC = () => {
               <tr className="hover:bg-neutral-800/40">
                 <td className="py-3 px-3 font-bold text-cyan-400">CST816T Touch (I2C)</td>
                 <td className="py-3 px-3 font-semibold text-white">RST (Touch Reset)</td>
-                <td className="py-3 px-3 font-bold text-cyan-300 bg-neutral-950/60 rounded">GPIO 5</td>
-                <td className="py-3 px-3 text-purple-300">-D PIN_TOUCH_RST=5</td>
-                <td className="py-3 px-3 text-neutral-400">Touch controller hardware reset pulse</td>
+                <td className="py-3 px-3 font-bold text-cyan-300 bg-neutral-950/60 rounded">GPIO 4 (Shared)</td>
+                <td className="py-3 px-3 text-purple-300">-D PIN_TOUCH_RST=4</td>
+                <td className="py-3 px-3 text-neutral-400">Shared reset with LCD_RST (or tie to ESP_EN &amp; set -1)</td>
               </tr>
 
               {/* Battery Monitoring ADC */}
@@ -149,8 +149,9 @@ export const HardwareSpecs: React.FC = () => {
         <div className="mt-4 p-3 bg-blue-950/30 border border-blue-900/40 rounded-xl text-xs text-blue-300 flex items-start gap-2">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-blue-400" />
           <span>
-            <strong>Hardware Architecture Note:</strong> On the Olimex ESP32-PoE2, the Microchip LAN8720A RMII PHY uses 
-            <strong> GPIO 0, 12, 18, and 23</strong>. The battery sense pin on <strong>GPIO 35</strong> belongs to 
+            <strong>Hardware Architecture Note:</strong> On the Olimex ESP32-PoE2, the Microchip LAN8720A RMII PHY permanently uses 
+            <strong> GPIO 0, 12, 18, 19, 21 (EMAC_TX_EN), 22, 23, 25, 26, and 27</strong>, while WROVER PSRAM uses <strong>GPIO 16–17</strong>. 
+            Backlight PWM uses <strong>GPIO 5</strong> and Touch RST shares <strong>GPIO 4</strong> with LCD RST. The battery sense pin on <strong>GPIO 35</strong> belongs to 
             <strong> ADC1</strong>, allowing reliable analog reads even while the Wi-Fi radio is active or falling back.
           </span>
         </div>
