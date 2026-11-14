@@ -3035,7 +3035,9 @@ void setupWebServer() {
     html += custom_tz_posix;
     html += F("'></div></div>"
               "<div class='grid-3' style='margin-top:10px;'>"
-              "<div><label>Separate MTC Reader (<a href='/rtpmidi' style='color:#38bdf8;'>UDP " + String(mtc_rtpmidi_port) + "</a>)</label><select name='mtc_reader'>"
+              "<div><label>Separate MTC Reader (<a href='/rtpmidi' style='color:#38bdf8;'>UDP ");
+    html += String(mtc_rtpmidi_port);
+    html += F("</a>)</label><select name='mtc_reader'>"
               "<option value='0'"); if (!mtc_reader_enabled) html += F(" selected"); html += F(">Disabled</option>"
               "<option value='1'"); if (mtc_reader_enabled) html += F(" selected"); html += F(">Enabled</option></select></div>"
               "<div><label>External I2C ENV Sensor</label><select name='env_sensor'>"
