@@ -10,7 +10,7 @@ Broadcast tally and theatrical cue light firmware adapted specifically for the *
 The Waveshare 1.69" module features an onboard **CST816T capacitive touch controller** connected over I2C (`SDA: GPIO 33`, `SCL: GPIO 32`, `INT: GPIO 34`, `RST: GPIO 4` shared with LCD RST):
 * **Single Tap on Screen:** Exact equivalent of clicking the physical button.
   * In **TP / TP_P2P Mode:** Toggles Channel 1 Program TSL return cue (`sendtally(1, state)`, turns screen Red). When Presenter cues Preview (`0x31`) while TP is idle, TP's screen turns **Green (`PREVIEW`)** until deselected or TP activates Program.
-  * In **Presenter / Presenter_P2P Mode:** Toggles Channel 1 Preview TSL return cue (`0x31`).
+  * In **Presenter / Presenter_P2P Mode:** Toggles Channel 1 Preview TSL return cue (`0x31`); in `Presenter_P2P` (No TA), the Presenter screen also turns **Green (`PREVIEW`)** while active (overridden by Red if TP goes Program).
   * In **ETC CueSystem Mode:** Acknowledges Standby call (`CS,<ch>,ACK\n`), turning flashing red into solid red.
   * In **NMOS IS-07 Mode:** Toggles On-Air tally state.
   * In **Promptside / OSC Cue Light Mode:** Transmits stage acknowledgment packet.

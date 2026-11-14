@@ -203,7 +203,7 @@ export function UserManual() {
                   mode: 'Presenter Standalone (P2P Slave)',
                   badge: 'Zero-Conf P2P',
                   color: 'bg-amber-500/20 text-amber-400 border-amber-500/40',
-                  desc: 'Direct unit-to-unit operation. Talent pushes button to cue TP unit over TSL 3.1 UDP (turns TP screen Green PREVIEW until cleared or TP goes Program Red). Monitors connection health with 4-missed fault alarm.'
+                  desc: 'Direct unit-to-unit operation. Talent pushes button to turn both Presenter and TP screens Green PREVIEW over TSL 3.1 UDP until deselected or TP goes Program Red. Monitors connection health with 4-missed fault alarm.'
                 },
                 {
                   mode: 'ETC CueSystem Outstation',

@@ -2621,7 +2621,7 @@ void computeTallyVisualState(uint16_t& bgColor, uint16_t& textColor, String& sta
   } else if (snapType == "\"program\"") {
     bgColor = TFT_RED; textColor = TFT_WHITE;
     statusLabel = isNMOSIS07() ? "ON-AIR" : (isRTPMidi() || isOSC() ? "RED" : "PROGRAM");
-  } else if (snapType == "\"preview\"" || (isTP() && presenterCueActive)) {
+  } else if (snapType == "\"preview\"" || (isTP() && presenterCueActive) || (isP2PMode() && isPresenter() && ch1state)) {
     bgColor = TFT_GREEN; textColor = TFT_BLACK;
     statusLabel = (isRTPMidi() || isOSC()) ? "GREEN" : "PREVIEW";
   } else if (snapType == "\"yellow\"") {
@@ -4368,6 +4368,7 @@ void loop() {
   if (screen_dim_timeout_sec > 0) {
     bool isLiveOnAir = (actualType == "\"program\"" || actualType == "\"preview\"" ||
                         (isTP() && presenterCueActive) ||
+                        (isP2PMode() && isPresenter() && ch1state) ||
                         cuesystem_ack_active || promptside_state == "go" || msc_state == "go" ||
                         midi_active_red || osc_active_red || nmos_program_active || osccue_state == "go" ||
                         (isVmix() && vmix_tally_val > 0));

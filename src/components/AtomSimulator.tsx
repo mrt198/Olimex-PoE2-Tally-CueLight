@@ -399,7 +399,11 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
     if (state.tallyState === 'program') {
       return { bg: 'bg-red-600', text: 'text-white', isDark: true, label: 'PROGRAM' };
     }
-    if (state.tallyState === 'preview' || ((state.operatingMode === 'TP' || state.operatingMode === 'TP_P2P') && state.presenterCueActive)) {
+    if (
+      state.tallyState === 'preview' ||
+      ((state.operatingMode === 'TP' || state.operatingMode === 'TP_P2P') && state.presenterCueActive) ||
+      (state.operatingMode === 'Presenter_P2P' && state.isCueActive)
+    ) {
       return { bg: 'bg-emerald-500', text: 'text-black', isDark: false, label: 'PREVIEW' };
     }
     if (state.tallyState === 'aux') {

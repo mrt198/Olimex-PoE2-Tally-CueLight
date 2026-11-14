@@ -14,7 +14,8 @@ import {
   ExternalLink,
   Wrench,
   AlertTriangle,
-  BookOpen
+  BookOpen,
+  Box
 } from 'lucide-react';
 import { AtomSimulator, SimulatorState } from './components/AtomSimulator';
 import { CodeViewer } from './components/CodeViewer';
@@ -23,10 +24,11 @@ import { WebPortalPreview } from './components/WebPortalPreview';
 import { HardwareSpecs } from './components/HardwareSpecs';
 import { ArduinoTroubleshooting } from './components/ArduinoTroubleshooting';
 import { UserManual } from './components/UserManual';
+import { EnclosureDesigner } from './components/EnclosureDesigner';
 import { CPP_FIRMWARE_SOURCE, PLATFORMIO_INI } from './data/firmwareSources';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'simulator' | 'code' | 'diff' | 'portal' | 'hardware' | 'troubleshooting' | 'manual'>('simulator');
+  const [activeTab, setActiveTab] = useState<'simulator' | 'enclosure' | 'code' | 'diff' | 'portal' | 'hardware' | 'troubleshooting' | 'manual'>('simulator');
   const [copiedAll, setCopiedAll] = useState(false);
 
   // Simulator State
@@ -472,7 +474,20 @@ export default function App() {
             }`}
           >
             <Tv className="w-3.5 h-3.5 text-red-400" />
-            <span>Interactive Simulator</span>
+            <span className="whitespace-nowrap">Interactive Simulator</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('enclosure')}
+            className={`py-2.5 px-3.5 rounded-t-lg font-semibold flex items-center gap-2 transition-colors border-b-2 cursor-pointer whitespace-nowrap shrink-0 ${
+              activeTab === 'enclosure'
+                ? 'border-amber-500 text-white bg-neutral-850'
+                : 'border-transparent text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900'
+            }`}
+          >
+            <Box className="w-3.5 h-3.5 text-amber-400" />
+            <span>3D Enclosure &amp; STL</span>
           </button>
 
           <button
@@ -571,6 +586,8 @@ export default function App() {
             lastTslPacket={lastTslPacket}
           />
         )}
+
+        {activeTab === 'enclosure' && <EnclosureDesigner simState={simState} />}
 
         {activeTab === 'code' && <CodeViewer />}
 
