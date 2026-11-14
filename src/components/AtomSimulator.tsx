@@ -44,7 +44,7 @@ export interface SimulatorState {
   taPort: string;
   tslPort: string;
   flashActive: boolean;
-  operatingMode: 'TP' | 'Presenter' | 'TP_P2P' | 'Presenter_P2P' | 'ETC_CueSystem' | 'NMOS_IS07' | 'RTP_MIDI' | 'OSC' | 'TSL_31' | 'TSL_50' | 'OSC_CueLight' | 'Promptside' | 'MSC_RTP_MIDI';
+  operatingMode: 'TP' | 'Presenter' | 'TP_P2P' | 'Presenter_P2P' | 'ETC_CueSystem' | 'NMOS_IS07' | 'RTP_MIDI' | 'OSC' | 'TSL_31' | 'TSL_50' | 'OSC_CueLight' | 'Promptside' | 'MSC_RTP_MIDI' | 'vMix';
   pairingGroup: string;
   pairedTargetIP: string;
   pairedTargetName: string;
@@ -130,6 +130,13 @@ export interface SimulatorState {
   oscCueMessage: string;
   oscCueState: 'off' | 'standby_ack' | 'standby' | 'go';
   oscCueAckDone: boolean;
+  // vMix Live Production Tally (TCP API Port 8099)
+  vmixHost: string;
+  vmixPort: number;
+  vmixInput: number;
+  vmixLabel: string;
+  vmixBtnAction: number; // 0 = Diagnostics Screen, 1 = PreviewInput, 2 = ActiveInput
+  vmixTallyState: 0 | 1 | 2; // 0 = Off, 1 = Program (Red), 2 = Preview (Green)
   // ETC CueSystem configuration & state
   cueHost: string;
   cuePort: number;
@@ -377,18 +384,28 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
       return { bg: 'bg-neutral-950', text: 'text-white', isDark: true, label: 'OFF' };
     }
 
-    // Standard TSL / Tally Arbiter / P2P Modes
-    switch (state.tallyState) {
-      case 'program':
+    // vMix Live Production Tally (TCP API Port 8099)
+    if (state.operatingMode === 'vMix') {
+      if (state.vmixTallyState === 1) {
         return { bg: 'bg-red-600', text: 'text-white', isDark: true, label: 'PROGRAM' };
-      case 'preview':
+      }
+      if (state.vmixTallyState === 2) {
         return { bg: 'bg-emerald-500', text: 'text-black', isDark: false, label: 'PREVIEW' };
-      case 'aux':
-        return { bg: 'bg-amber-500', text: 'text-black', isDark: false, label: 'AUX' };
-      case 'standby':
-      default:
-        return { bg: 'bg-neutral-950', text: 'text-white', isDark: true, label: 'STANDBY' };
+      }
+      return { bg: 'bg-neutral-950', text: 'text-white', isDark: true, label: 'STANDBY' };
     }
+
+    // Standard TSL / Tally Arbiter / P2P Modes
+    if (state.tallyState === 'program') {
+      return { bg: 'bg-red-600', text: 'text-white', isDark: true, label: 'PROGRAM' };
+    }
+    if (state.tallyState === 'preview' || ((state.operatingMode === 'TP' || state.operatingMode === 'TP_P2P') && state.presenterCueActive)) {
+      return { bg: 'bg-emerald-500', text: 'text-black', isDark: false, label: 'PREVIEW' };
+    }
+    if (state.tallyState === 'aux') {
+      return { bg: 'bg-amber-500', text: 'text-black', isDark: false, label: 'AUX' };
+    }
+    return { bg: 'bg-neutral-950', text: 'text-white', isDark: true, label: 'STANDBY' };
   };
 
   const activeColor = resolveActiveColor();
@@ -424,8 +441,18 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
         const nextCue = !prev.isCueActive;
         return { ...prev, isCueActive: nextCue };
       }
+      if (prev.operatingMode === 'vMix') {
+        if (prev.vmixBtnAction === 0) {
+          return { ...prev, currentScreen: prev.currentScreen === 0 ? 1 : 0 };
+        }
+        onSendTslPacket(prev.vmixInput, prev.vmixBtnAction === 2);
+        return { ...prev, vmixTallyState: prev.vmixBtnAction === 2 ? 1 : 2 };
+      }
       const nextCue = !prev.isCueActive;
       onSendTslPacket(1, nextCue);
+      if (prev.operatingMode === 'TP_P2P') {
+        return { ...prev, isCueActive: nextCue, tallyState: nextCue ? 'program' : 'standby' };
+      }
       return { ...prev, isCueActive: nextCue };
     });
   };
@@ -584,6 +611,9 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
     }
     if (state.operatingMode === 'NMOS_IS07') {
       return state.nmosSource.slice(-12).toUpperCase();
+    }
+    if (state.operatingMode === 'vMix') {
+      return state.vmixLabel || state.deviceName || `vMix IN ${state.vmixInput}`;
     }
     return state.deviceName || 'UNASSIGNED';
   };
@@ -838,6 +868,7 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                             {state.operatingMode === 'OSC_CueLight' && '[OSC CUE-LX]'}
                             {state.operatingMode === 'Promptside' && '[PROMPTSIDE]'}
                             {state.operatingMode === 'MSC_RTP_MIDI' && '[MSC rtpMIDI]'}
+                            {state.operatingMode === 'vMix' && '[vMix]'}
                           </span>
                           <span className="opacity-90 font-normal">
                             IP: {displayedIP}
@@ -916,6 +947,8 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                             <div>TSL 5.0: <span>Port {state.tsl50Port} (Idx: {state.tsl50Index || 'All'})</span></div>
                           ) : (state.operatingMode === 'RTP_MIDI' || state.operatingMode === 'MSC_RTP_MIDI') ? (
                             <div>rtpMIDI RX: <span>UDP {state.operatingMode === 'MSC_RTP_MIDI' ? state.mscPort : state.rtpMidiPort} ({state.rtpMidiSessionName})</span></div>
+                          ) : state.operatingMode === 'vMix' ? (
+                            <div>vMix TCP: <span>{state.vmixHost}:{state.vmixPort} (In #{state.vmixInput})</span></div>
                           ) : (
                             <div>TA Server: <span>{state.taHost}:{state.taPort}</span></div>
                           )}
@@ -1017,7 +1050,8 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
               <span>• Single Tap:</span>
               <span className="text-white">
                 {state.operatingMode === 'ETC_CueSystem' ? 'Send Performer ACK' :
-                 state.operatingMode === 'NMOS_IS07' ? 'Toggle IS-07 PRG' : 'Toggle Cue Return'}
+                 state.operatingMode === 'NMOS_IS07' ? 'Toggle IS-07 PRG' :
+                 state.operatingMode === 'vMix' ? (state.vmixBtnAction === 0 ? 'Toggle Diag Screen' : state.vmixBtnAction === 1 ? 'Send PreviewInput' : 'Send ActiveInput') : 'Toggle Cue Return'}
               </span>
             </div>
             <div className="flex justify-between">
@@ -1350,6 +1384,22 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
               </div>
               <p className="text-[10.5px] text-neutral-400 mt-0.5">MIDI Show Control</p>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setState(prev => ({ ...prev, operatingMode: 'vMix' }))}
+              className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                state.operatingMode === 'vMix'
+                  ? 'bg-sky-950/60 text-white border-sky-400 shadow-md shadow-sky-950/50'
+                  : 'bg-neutral-950 text-neutral-400 border-neutral-800 hover:border-neutral-700'
+              }`}
+            >
+              <div className="font-bold text-xs font-mono text-sky-400 flex items-center gap-1">
+                <Tv className="w-3.5 h-3.5" />
+                <span>vMix Tally</span>
+              </div>
+              <p className="text-[10.5px] text-neutral-400 mt-0.5">TCP API (Port 8099)</p>
+            </button>
           </div>
         </div>
 
@@ -1376,7 +1426,8 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                   nmosOnAir: true,
                   nmosPreview: false,
                   promptsideState: 'go',
-                  oscCueState: 'go'
+                  oscCueState: 'go',
+                  vmixTallyState: 1
                 }));
               }}
               className="py-2.5 px-3 rounded-xl bg-red-950/70 hover:bg-red-900/80 text-red-200 border border-red-700/80 font-mono text-xs font-bold transition-all shadow-md shadow-red-950/40 cursor-pointer"
@@ -1395,7 +1446,8 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                   nmosOnAir: false,
                   nmosPreview: true,
                   promptsideState: 'standby',
-                  oscCueState: 'standby'
+                  oscCueState: 'standby',
+                  vmixTallyState: 2
                 }));
               }}
               className="py-2.5 px-3 rounded-xl bg-emerald-950/70 hover:bg-emerald-900/80 text-emerald-200 border border-emerald-700/80 font-mono text-xs font-bold transition-all shadow-md shadow-emerald-950/40 cursor-pointer"
@@ -1433,7 +1485,8 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                   promptsideState: 'standby_ack',
                   promptsideAckDone: false,
                   oscCueState: 'standby_ack',
-                  oscCueAckDone: false
+                  oscCueAckDone: false,
+                  vmixTallyState: 0
                 }));
               }}
               className="py-2.5 px-3 rounded-xl bg-neutral-950 hover:bg-neutral-800 text-neutral-300 border border-neutral-700 font-mono text-xs font-bold transition-all cursor-pointer"
@@ -1898,6 +1951,90 @@ export const AtomSimulator: React.FC<AtomSimulatorProps> = ({
                   className="py-2 px-2 rounded-lg bg-neutral-950 border border-neutral-700 text-neutral-300 font-bold cursor-pointer"
                 >
                   /off
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* vMix Live Production Tally Controls */}
+          {state.operatingMode === 'vMix' && (
+            <div className="p-4 bg-neutral-950 rounded-xl border border-sky-900/40 space-y-3 text-xs font-mono">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Tv className="w-4 h-4" />
+                  <span>vMix Live Production Tally (TCP API {state.vmixHost}:{state.vmixPort})</span>
+                </span>
+                <span className="text-[11px] font-mono text-neutral-400">Input #{state.vmixInput}</span>
+              </div>
+              <p className="text-xs text-neutral-400 font-sans">
+                Subscribes via TCP socket with <code className="text-cyan-300">SUBSCRIBE TALLY\r\n</code> and parses real-time <code className="text-cyan-300">TALLY OK ...</code> strings (<code className="text-red-300">1</code> = Program Red, <code className="text-emerald-300">2</code> = Preview Green, <code className="text-neutral-300">0</code> = Off).
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="text-[10px] text-neutral-400 block mb-1">VMIX HOST IP:</label>
+                  <input
+                    type="text"
+                    value={state.vmixHost}
+                    onChange={(e) => setState(prev => ({ ...prev, vmixHost: e.target.value }))}
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-white text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-neutral-400 block mb-1">INPUT NUMBER (1-999):</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={999}
+                    value={state.vmixInput}
+                    onChange={(e) => setState(prev => ({ ...prev, vmixInput: Math.max(1, parseInt(e.target.value) || 1) }))}
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-cyan-400 font-bold text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-neutral-400 block mb-1">CUSTOM LABEL:</label>
+                  <input
+                    type="text"
+                    value={state.vmixLabel}
+                    onChange={(e) => setState(prev => ({ ...prev, vmixLabel: e.target.value }))}
+                    placeholder="e.g. CAM 1"
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-white font-bold text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-neutral-400 block mb-1">SINGLE TAP ACTION:</label>
+                  <select
+                    value={state.vmixBtnAction}
+                    onChange={(e) => setState(prev => ({ ...prev, vmixBtnAction: parseInt(e.target.value) || 0 }))}
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-white text-xs"
+                  >
+                    <option value={0}>Toggle Diag Screen</option>
+                    <option value={1}>Send PreviewInput</option>
+                    <option value={2}>Send ActiveInput</option>
+                  </select>
+                </div>
+              </div>
+              <div className="pt-2 border-t border-neutral-800 flex flex-wrap gap-2 items-center">
+                <span className="text-[11px] text-neutral-400">Simulate TALLY OK State:</span>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, vmixTallyState: 1 }))}
+                  className={`px-2.5 py-1 rounded text-xs font-bold border cursor-pointer ${state.vmixTallyState === 1 ? 'bg-red-600 text-white border-red-500' : 'bg-neutral-800 text-red-400 border-neutral-700'}`}
+                >
+                  PROGRAM (1 - Red)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, vmixTallyState: 2 }))}
+                  className={`px-2.5 py-1 rounded text-xs font-bold border cursor-pointer ${state.vmixTallyState === 2 ? 'bg-emerald-600 text-black border-emerald-500' : 'bg-neutral-800 text-emerald-400 border-neutral-700'}`}
+                >
+                  PREVIEW (2 - Green)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, vmixTallyState: 0 }))}
+                  className={`px-2.5 py-1 rounded text-xs border cursor-pointer ${state.vmixTallyState === 0 ? 'bg-neutral-700 text-white border-neutral-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700 hover:text-white'}`}
+                >
+                  STANDBY (0 - Off)
                 </button>
               </div>
             </div>

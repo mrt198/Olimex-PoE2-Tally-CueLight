@@ -359,6 +359,22 @@ mbedtls_md5_finish(&_ctx, (unsigned char *)_buf);`}
             </p>
           </div>
         </div>
+
+        {/* Upstream Network Grace Window, Captive Portal Timeout & HTTP Save Fix */}
+        <div className="p-4 bg-blue-950/30 border border-blue-800/50 rounded-xl space-y-2.5 text-xs">
+          <div className="text-cyan-400 font-bold flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>Ethernet Boot Grace Window, Captive Portal Timeout &amp; Non-Resetting Web /save</span>
+          </div>
+          <p className="text-neutral-300 leading-relaxed text-[11px]">
+            <strong>Causes Fixed:</strong> Calling <code className="text-amber-300">espConnect.begin()</code> immediately at boot caused Wi-Fi STA/AP netif churn during PoE DHCP startup, and <code className="text-amber-300">PORTAL_TIMEOUT</code> could trigger unintended MCU restarts. Additionally, running <code className="text-amber-300">ETH.config()</code>, mDNS queries, or LCD sprite reallocation inside AsyncTCP&apos;s <code className="text-neutral-200">/save</code> callback before sending HTTP 200 could reset the browser&apos;s connection.
+          </p>
+          <div className="p-2.5 bg-neutral-950 rounded-lg border border-neutral-800 text-[11px] text-emerald-300 space-y-1">
+            <div>&check; <strong>7-Second PoE Grace Window:</strong> <code className="text-cyan-300 font-mono">espConnect.setAutoRestart(false)</code> prevents timeout reboots, and Wi-Fi fallback starts only if PoE Ethernet fails to link within 7s.</div>
+            <div>&check; <strong>Deferred mDNS / OTA / IP Apply:</strong> <code className="text-cyan-300 font-mono">MDNS.begin()</code> &amp; <code className="text-cyan-300 font-mono">ArduinoOTA</code> (with <code className="text-cyan-300 font-mono">setMdnsEnabled(false)</code>) wait until an IP is assigned, and <code className="text-cyan-300 font-mono">/save</code> sends HTTP 200 <em>first</em> before deferring IP/LCD/mDNS updates onto Core 1 <code className="text-cyan-300 font-mono">loop()</code>.</div>
+            <div>&check; <strong>Core 0 Isolation:</strong> All <code className="text-cyan-300 font-mono">SocketIOclient</code> and <code className="text-cyan-300 font-mono">vMix TCP 8099</code> traffic runs inside Core 0 <code className="text-cyan-300 font-mono">socketTask</code> protected by <code className="text-cyan-300 font-mono">taStateMutex</code>.</div>
+          </div>
+        </div>
       </div>
 
       {/* Olimex ESP32-PoE2 Hardware & Pin Troubleshooting */}

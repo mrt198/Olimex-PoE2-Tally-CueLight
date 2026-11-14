@@ -194,14 +194,12 @@ mdns_service_add(mtcInst.c_str(), "_apple-midi", "_udp", 5006, txt, 2); // MTC R
     explanation: 'Adds a dedicated /wifi page that can wake the STA radio to scan nearby 2.4 GHz APs even when PoE shuts Wi-Fi down, plus a /rtpmidi setup portal registering separate _apple-midi._udp mDNS sessions for Tally/MSC (5004/5005) and global MTC Timecode (5006/5007).'
   },
   {
-    category: 'vMix TCP API Tally (Port 8099) & Core 0 Non-Blocking Mutex',
-    original: `// Core 1 connectToServer() & synchronous TCP sockets can stall touch/LCD`,
-    adapted: `// Core 0 socketTask() runs Socket.IO + handleVmixSocketLoop() (TCP 8099):
-vmixClient.connect(host, 8099, 1500);
-vmixClient.print("SUBSCRIBE TALLY\\r\\n");
-// Thread-safe shared state guard between Core 0 & Core 1:
-xSemaphoreTake(taStateMutex, pdMS_TO_TICKS(15));
-ArduinoOTA.setMdnsEnabled(false); // Avoid mDNS collision with ESPmDNS`,
-    explanation: 'Adds native vMix Live Production Switcher Tally (Mode 14) on TCP port 8099 with optional PreviewInput/ActiveInput single-tap triggers, isolates TCP reconnects onto Core 0 with taStateMutex guards, prevents mDNS collisions with ArduinoOTA, and avoids redundant ETH.config() lease drops on /save.'
+    category: 'vMix TCP 8099, Core 0 Mutex, P2P Preview & Non-Resetting /save',
+    original: `// Core 1 sockets, ETH.config() before HTTP 200 response, & TP_P2P text-only cue`,
+    adapted: `// 1. Core 0 socketTask(): Socket.IO + handleVmixSocketLoop() (TCP 8099) + taStateMutex
+// 2. /save sends HTTP 200 FIRST, then defers IP/LCD/mDNS updates onto loop()
+// 3. computeTallyVisualState(): (isTP() && presenterCueActive) -> Green PREVIEW
+// 4. 7s PoE grace window + espConnect.setAutoRestart(false) + delayed MDNS`,
+    explanation: 'Adds native vMix Live Production Switcher Tally (Mode 14) on TCP port 8099, isolates TCP reconnects onto Core 0 with taStateMutex, turns the TP screen Green (PREVIEW) when Presenter cues in P2P mode, prevents browser ERR_CONNECTION_RESET by sending HTTP 200 before applying IP/LCD/mDNS updates on /save, and stabilizes Wi-Fi fallback with a 7s PoE grace window.'
   }
 ];

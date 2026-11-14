@@ -167,7 +167,7 @@ export function UserManual() {
         </div>
       )}
 
-      {/* SECTION: 13 Operating Modes */}
+      {/* SECTION: 14 Operating Modes */}
       {activeSection === 'modes' && (
         <div className="space-y-6">
           <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-6 space-y-4">
@@ -203,7 +203,7 @@ export function UserManual() {
                   mode: 'Presenter Standalone (P2P Slave)',
                   badge: 'Zero-Conf P2P',
                   color: 'bg-amber-500/20 text-amber-400 border-amber-500/40',
-                  desc: 'Direct unit-to-unit operation. Talent pushes button to call TP unit over TSL 3.1 UDP. Monitors connection health with 4-missed fault alarm.'
+                  desc: 'Direct unit-to-unit operation. Talent pushes button to cue TP unit over TSL 3.1 UDP (turns TP screen Green PREVIEW until cleared or TP goes Program Red). Monitors connection health with 4-missed fault alarm.'
                 },
                 {
                   mode: 'ETC CueSystem Outstation',
@@ -406,7 +406,7 @@ export function UserManual() {
               </p>
               <ul className="list-disc list-inside text-xs text-slate-300 space-y-1">
                 <li><strong>Mode Receiver (Default UDP 5004/5005):</strong> Dedicated to <code>RTP_MIDI</code> and <code>MSC_RTP_MIDI</code> tally/cue triggers and MIDI button feedback.</li>
-                <li><strong>Separate MTC Receiver (Default UDP 5006/5007):</strong> Active globally across all 13 operating modes so SMPTE timecode can originate from a separate DAW or QLab machine.</li>
+                <li><strong>Separate MTC Receiver (Default UDP 5006/5007):</strong> Active globally across all 14 operating modes so SMPTE timecode can originate from a separate DAW or QLab machine.</li>
               </ul>
             </div>
           </div>

@@ -539,13 +539,23 @@ AsyncWebServer server(80);
 Mycila::ESPConnect espConnect(server);
 
 // Multi-Core & Thread-Safety Variables (FreeRTOS)
-volatile bool tallyStateChanged     = false;
-volatile bool flashRequested        = false;
-volatile bool taConnectRequested    = false;
-volatile bool taDisconnectRequested = false;
-volatile bool taSocketConnected     = false;
-SemaphoreHandle_t taStateMutex      = NULL;
-TaskHandle_t socketTaskHandle       = NULL;
+volatile bool tallyStateChanged       = false;
+volatile bool flashRequested          = false;
+volatile bool needNetworkServicesInit = false;
+volatile bool needNmosDiscovery       = false;
+volatile bool ethPrecedenceCheckDue   = false;
+volatile bool needApplySavedConfig    = false;
+volatile bool needRotationApply       = false;
+unsigned long savedConfigTimestampMs  = 0;
+bool espConnectStarted                = false;
+bool servicesStarted                  = false;
+bool udpStarted                       = false;
+unsigned long bootStartTimeMs         = 0;
+volatile bool taConnectRequested      = false;
+volatile bool taDisconnectRequested   = false;
+volatile bool taSocketConnected       = false;
+SemaphoreHandle_t taStateMutex        = NULL;
+TaskHandle_t socketTaskHandle         = NULL;
 
 // Forward Declarations
 void initBatteryADC();
@@ -558,9 +568,12 @@ void handleScreenLongPress();
 void initDoubleBuffer();
 void applyPowerManagementConfig();
 void wakeDisplayFromDim();
+void startNetworkServices();
+void startEspConnectFallback();
 void socketTask(void *pvParameters);
 void handleVmixSocketLoop();
 const char* getActiveRoleTag();
+uint16_t getActiveListenPort();
 void sendtally(int channel, bool live);
 void sendCueAck();
 void sendNMOSTally(bool live);
@@ -570,6 +583,7 @@ void handleP2PHeartbeatCheck();
 void sendMidiButtonAction(bool pressed);
 void readEnvSensor();
 void processIncomingTSL();
+void processSingleUdpPacket(byte* packetBuffer, int len);
 void processRTPMidiPacket(uint8_t* buf, int len, IPAddress remoteIP, uint16_t remotePort);
 void processTallyMidiReceivers();
 void processMtcMidiReceivers();
@@ -948,6 +962,16 @@ void handleScreenSingleTap() {
   } else {
     logger(String("[Touch] Single Tap -> Toggle Cue CH1 (") + (isPresenter() ? "Presenter Preview" : "TP Program") + ")", "info");
     ch1state = !ch1state;
+    if (isP2PMode() && isTP()) {
+      if (taStateMutex != NULL && xSemaphoreTake(taStateMutex, pdMS_TO_TICKS(15)) == pdTRUE) {
+        actualType = ch1state ? "\"program\"" : "";
+        actualColor = ch1state ? "#FF0000" : "";
+        xSemaphoreGive(taStateMutex);
+      } else {
+        actualType = ch1state ? "\"program\"" : "";
+        actualColor = ch1state ? "#FF0000" : "";
+      }
+    }
     if (networkConnected) sendtally(1, ch1state);
     renderScreen();
   }
@@ -1040,12 +1064,16 @@ void applyNetworkIPConfig(bool force) {
       return;
     }
   }
-  if (!force && currentConfiguredDHCP && isEthernetActive()) {
+  if (!force && useDHCP && currentConfiguredDHCP) {
     return;
   }
   logger("[Network] DHCP IP assignment configured", "info");
   ETH.config(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
   currentConfiguredDHCP = true;
+  currentConfiguredIP = "";
+  currentConfiguredMask = "";
+  currentConfiguredGW = "";
+  currentConfiguredDNS = "";
 }
 
 void applyTimezoneConfig() {
@@ -1162,7 +1190,7 @@ void sendMidiButtonAction(bool pressed) {
 // P2P 0.25s (250ms) Heartbeat & 4-Missed Fault Detection
 // ==========================================
 void sendP2PPing() {
-  if (!networkConnected || !isP2PMode()) return;
+  if (!networkConnected || !udpStarted || !isP2PMode()) return;
   p2p_heartbeat_seq++;
   String pingStr = "CXPING," + pairingGroup + "," + String(p2p_heartbeat_seq) + "," + listenerDeviceName + "\n";
   IPAddress targetIP(255, 255, 255, 255);
@@ -1175,7 +1203,7 @@ void sendP2PPing() {
 }
 
 void sendP2PPong(uint32_t seq) {
-  if (!networkConnected || !isP2PMode()) return;
+  if (!networkConnected || !udpStarted || !isP2PMode()) return;
   String pongStr = "CXPONG," + pairingGroup + "," + String(seq) + "," + listenerDeviceName + "\n";
   IPAddress targetIP(255, 255, 255, 255);
   if (pairedTargetIP.length() > 0 && pairedTargetIP != "0.0.0.0") {
@@ -1304,6 +1332,54 @@ void applyWifiConfig() {
   }
 }
 
+void startEspConnectFallback() {
+  if (espConnectStarted || isEthernetActive() || ETH.linkUp()) return;
+  logger("[Network] Initializing MycilaESPConnect Wi-Fi fallback...", "info");
+  esp_wifi_start();
+  WiFi.mode(WIFI_STA);
+  espConnect.setAutoRestart(false);
+  espConnect.setBlocking(false);
+  espConnect.begin(listenerDeviceName.c_str(), listenerDeviceName.c_str());
+  espConnectStarted = true;
+  if (wifi_ssid.length() > 0) {
+    applyWifiConfig();
+  }
+}
+
+void startNetworkServices() {
+  if (!networkConnected || servicesStarted) return;
+  servicesStarted = true;
+
+  applyTimezoneConfig();
+
+  // Disable ArduinoOTA's internal mDNS responder so it doesn't collide with ESPmDNS
+  ArduinoOTA.setMdnsEnabled(false);
+  ArduinoOTA.setHostname(listenerDeviceName.c_str());
+  ArduinoOTA.setPassword("tallyarbiter");
+  ArduinoOTA.begin();
+
+  if (MDNS.begin(mdnsdotlocalurl.c_str())) {
+    MDNS.addService("CueLX", "tcp", 80);
+    MDNS.addService("http", "tcp", 80);
+    uint16_t mDnsPort = getActiveListenPort();
+    MDNS.addService("cuelx-tally", "udp", mDnsPort);
+    MDNS.addServiceTxt("cuelx-tally", "udp", "mode", operatingMode.c_str());
+    MDNS.addServiceTxt("cuelx-tally", "udp", "role", getActiveRoleTag());
+    MDNS.addServiceTxt("cuelx-tally", "udp", "group", pairingGroup.c_str());
+    MDNS.addServiceTxt("cuelx-tally", "udp", "name", listenerDeviceName.c_str());
+    registerAppleMidiMDNS();
+    logger(String("[mDNS] Services registered at http://") + mdnsdotlocalurl + ".local", "info");
+  } else {
+    logger("[mDNS] Failed to start mDNS responder", "error");
+  }
+
+  startMidiReceivers();
+  connectConfiguredMidiPeers();
+  if (wifi_keep_on_with_poe && wifi_ssid.length() > 0 && WiFi.status() != WL_CONNECTED) {
+    applyWifiConfig();
+  }
+}
+
 // Manage Wi-Fi / Bluetooth power vs PoE Ethernet precedence (safe during temporary AP scans)
 void checkEthernetWifiPrecedence() {
   if (wifiScanInProgress) {
@@ -1315,7 +1391,13 @@ void checkEthernetWifiPrecedence() {
     if (!wifi_keep_on_with_poe) {
       if (!wifiDisabledForEth) {
         wifiDisabledForEth = true;
-        logger("[Network] PoE Ethernet active (" + ETH.localIP().toString() + "). Disabling Wi-Fi & Bluetooth.", "info");
+        ETH.setDefault();
+        if (espConnectStarted) {
+          espConnect.end();
+          espConnectStarted = false;
+        }
+        logger("[Network] PoE Ethernet active (" + ETH.localIP().toString() + "). ETH default route set; disabling Wi-Fi & Bluetooth.", "info");
+        WiFi.enableAP(false);
         WiFi.disconnect(false);
         WiFi.mode(WIFI_OFF);
         esp_wifi_stop();
@@ -1326,21 +1408,22 @@ void checkEthernetWifiPrecedence() {
       }
     } else if (wifiDisabledForEth && wifi_ssid.length() > 0) {
       wifiDisabledForEth = false;
+      ETH.setDefault();
       esp_wifi_start();
       WiFi.mode(WIFI_STA);
       WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
     }
-  } else {
+  } else if (!ETH.linkUp()) {
     battery.isPoE = false;
     if (wifiDisabledForEth) {
       wifiDisabledForEth = false;
       logger("[Network] PoE Ethernet disconnected. Re-enabling Wi-Fi fallback.", "info");
-      esp_wifi_start();
-      WiFi.mode(WIFI_STA);
       if (wifi_ssid.length() > 0) {
+        esp_wifi_start();
+        WiFi.mode(WIFI_STA);
         WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
       } else {
-        espConnect.begin(listenerDeviceName.c_str(), listenerDeviceName.c_str());
+        startEspConnectFallback();
       }
     }
   }
@@ -1385,7 +1468,7 @@ void setupTSLTcpServer(uint16_t port) {
 // TSL 3.1 UDP Packet Sender
 // ==========================================
 void sendtally(int channel, bool live) {
-  if (!networkConnected) return;
+  if (!networkConnected || !udpStarted) return;
 
   byte channelname[16];
   String lbl = DeviceName;
@@ -1428,7 +1511,7 @@ void sendtally(int channel, bool live) {
 // ETC CueSystem Acknowledge Packet Sender
 // ==========================================
 void sendCueAck() {
-  if (!networkConnected) return;
+  if (!networkConnected || !udpStarted) return;
   cuesystem_ack_active = true;
   String ackMsg = String("CS,") + String(cuesystem_channel) + ",ACK\n";
   IPAddress cueIP;
@@ -1444,7 +1527,7 @@ void sendCueAck() {
 // NMOS IS-07 Event & Tally Sender
 // ==========================================
 void sendNMOSTally(bool live) {
-  if (!networkConnected) return;
+  if (!networkConnected || !udpStarted) return;
   nmos_is_on_air = live;
   JSONVar msg;
   msg["message_type"] = "state";
@@ -1467,13 +1550,21 @@ void sendNMOSTally(bool live) {
 // Incoming Packet Receiver (All Protocols)
 // ==========================================
 void processIncomingTSL() {
-  int packetSize = udp.parsePacket();
-  if (packetSize <= 0) return;
+  if (!networkConnected || !udpStarted) return;
 
   byte packetBuffer[512];
-  int len = udp.read(packetBuffer, sizeof(packetBuffer) - 1);
-  if (len <= 0) return;
-  packetBuffer[len] = '\0';
+  for (int pktIdx = 0; pktIdx < 8; pktIdx++) {
+    int packetSize = udp.parsePacket();
+    if (packetSize <= 0) break;
+
+    int len = udp.read(packetBuffer, sizeof(packetBuffer) - 1);
+    if (len <= 0) continue;
+    packetBuffer[len] = '\0';
+    processSingleUdpPacket(packetBuffer, len);
+  }
+}
+
+void processSingleUdpPacket(byte* packetBuffer, int len) {
 
   // P2P Heartbeat Ping / Pong Packet Detection
   String p2pHeader = String((char*)packetBuffer);
@@ -2530,7 +2621,7 @@ void computeTallyVisualState(uint16_t& bgColor, uint16_t& textColor, String& sta
   } else if (snapType == "\"program\"") {
     bgColor = TFT_RED; textColor = TFT_WHITE;
     statusLabel = isNMOSIS07() ? "ON-AIR" : (isRTPMidi() || isOSC() ? "RED" : "PROGRAM");
-  } else if (snapType == "\"preview\"") {
+  } else if (snapType == "\"preview\"" || (isTP() && presenterCueActive)) {
     bgColor = TFT_GREEN; textColor = TFT_BLACK;
     statusLabel = (isRTPMidi() || isOSC()) ? "GREEN" : "PREVIEW";
   } else if (snapType == "\"yellow\"") {
@@ -3469,7 +3560,7 @@ void setupWebServer() {
     rHtml += mtc_session_connected ? "ok'>Connected: " + mtc_last_sender : "idle'>Independent Port";
     rHtml += F("</span></h2><p style='font-size:12px;color:#cbd5e1;margin:0 0 8px 0;'>Live MTC: <strong style='color:#fbbf24;'>");
     rHtml += mtc_timecode_str;
-    rHtml += F("</strong> (Active across ALL 13 operating modes on its own UDP port &amp; mDNS instance)</p>"
+    rHtml += F("</strong> (Active across ALL 14 operating modes on its own UDP port &amp; mDNS instance)</p>"
                "<div class='grid-2'><div><label>Enable MTC Reader</label><select id='mtc_en'>"
                "<option value='1'"); if (mtc_reader_enabled) rHtml += F(" selected"); rHtml += F(">Enabled</option>"
                "<option value='0'"); if (!mtc_reader_enabled) rHtml += F(" selected"); rHtml += F(">Disabled</option></select></div>"
@@ -3609,13 +3700,13 @@ void setupWebServer() {
     preferences.putInt("mtcPeerPort", mtc_peer_port);
     preferences.end();
 
-    startMidiReceivers();
-    connectConfiguredMidiPeers();
-    renderScreen();
-
     JSONVar res;
     res["success"] = true;
     request->send(200, "application/json", JSON.stringify(res));
+
+    startMidiReceivers();
+    connectConfiguredMidiPeers();
+    tallyStateChanged = true;
   });
 
   // REST API: GET /api/env
@@ -3750,7 +3841,7 @@ void setupWebServer() {
     preferences.putString("pairGroup", pairingGroup);
     preferences.end();
 
-    renderScreen();
+    tallyStateChanged = true;
     JSONVar res;
     res["success"] = true;
     res["pairedTargetIP"] = pairedTargetIP;
@@ -3761,15 +3852,18 @@ void setupWebServer() {
 
   // Form Save Handler
   server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
+    uint8_t prevRotation = currentRotation;
     if (request->hasParam("mode", true)) operatingMode = request->getParam("mode", true)->value();
     if (request->hasParam("timezone_name", true)) timezone_name = request->getParam("timezone_name", true)->value();
     if (request->hasParam("custom_tz_posix", true)) custom_tz_posix = request->getParam("custom_tz_posix", true)->value();
     if (request->hasParam("mtc_reader", true)) mtc_reader_enabled = (request->getParam("mtc_reader", true)->value() == "1");
     if (request->hasParam("env_sensor", true)) env_sensor_enabled = (request->getParam("env_sensor", true)->value() == "1");
     if (request->hasParam("rotation", true)) {
-      currentRotation = (uint8_t)(request->getParam("rotation", true)->value().toInt() % 4);
-      lcd.setRotation(currentRotation);
-      initDoubleBuffer();
+      uint8_t nextRot = (uint8_t)(request->getParam("rotation", true)->value().toInt() % 4);
+      if (nextRot != prevRotation) {
+        currentRotation = nextRot;
+        needRotationApply = true;
+      }
     }
 
     if (request->hasParam("prompt_port", true)) promptside_port = request->getParam("prompt_port", true)->value().toInt();
@@ -3926,41 +4020,18 @@ void setupWebServer() {
     preferences.putInt("dimTimeout", screen_dim_timeout_sec);
     preferences.end();
 
-    applyNetworkIPConfig(false);
-    applyTimezoneConfig();
-    applyPowerManagementConfig();
-
-    if (operatingMode == "TSL_31" && tsl31_transport == "TCP") setupTSLTcpServer(tsl31_port);
-    else if (operatingMode == "TSL_50" && tsl50_transport == "TCP") setupTSLTcpServer(tsl50_port);
-    else if (tslTcpServer != nullptr) {
-      tslTcpServer->end();
-      delete tslTcpServer;
-      tslTcpServer = nullptr;
-    }
-
-    if (networkConnected) {
-      udp.stop();
-      udp.begin(getActiveListenPort());
-      startMidiReceivers();
-      connectConfiguredMidiPeers();
-      if (isNMOSIS07() && nmos_auto_discover) discoverNMOSRegistrationServer();
-      if (isVmix()) vmixReconnectRequested = true;
-    }
-
-    MDNS.addServiceTxt("cuelx-tally", "udp", "mode", operatingMode.c_str());
-    MDNS.addServiceTxt("cuelx-tally", "udp", "role", getActiveRoleTag());
-    MDNS.addServiceTxt("cuelx-tally", "udp", "group", pairingGroup.c_str());
-    MDNS.addServiceTxt("cuelx-tally", "udp", "name", listenerDeviceName.c_str());
-
-    if (usesTallyArbiter()) connectToServer();
-    else disconnectFromServer();
-
+    // 1. Send HTTP 200 response FIRST before any IP/mDNS/LCD/socket changes so browser never sees ERR_CONNECTION_RESET
     request->send(200, "text/html", "<html><body style='background:#0f172a;color:#f1f5f9;font-family:sans-serif;padding:30px;'>"
                                     "<h2>Configuration Saved!</h2>"
                                     "<p>Mode: <strong>" + operatingMode + "</strong></p>"
-                                    "<p>IP Mode: <strong>" + (useDHCP ? String("DHCP") : (String("Static: ") + static_ip)) + "</strong></p>"
+                                    "<p>IP Mode: <strong>" + (useDHCP ? String("DHCP (Automatic)") : (String("Static IP: ") + static_ip)) + "</strong></p>"
+                                    "<p>Group: <strong>" + pairingGroup + "</strong></p>"
                                     "<a href='/' style='color:#38bdf8;text-decoration:none;font-weight:600;'>Return to Dashboard</a></body></html>");
-    renderScreen();
+
+    // 2. Defer IP/display/mDNS/NMOS/socket updates to Core 1 loop() (~150ms later) so TCP response flushes cleanly
+    savedConfigTimestampMs = millis();
+    needApplySavedConfig = true;
+    tallyStateChanged = true;
   });
 
   server.begin();
@@ -4068,6 +4139,7 @@ void setup() {
   preferences.end();
 
   taStateMutex = xSemaphoreCreateMutex();
+  bootStartTimeMs = millis();
 
   // Initialize Waveshare 1.69" LCD & allocate 134.4 KB Double Buffer BEFORE network stacks
   lcd.init();
@@ -4117,15 +4189,17 @@ void setup() {
         logger("[ETH] Cable connected (Link UP)", "info");
         break;
       case ARDUINO_EVENT_ETH_GOT_IP:
-        logger(String("[ETH] IP Assigned: ") + ETH.localIP().toString(), "info");
+        ETH.setDefault();
+        logger(String("[ETH] IP Assigned (") + (useDHCP ? "DHCP" : "Static") + "): " + ETH.localIP().toString(), "info");
         networkConnected = true;
+        needNetworkServicesInit = true;
+        ethPrecedenceCheckDue = true;
         battery.isPoE = true;
-        udp.begin(getActiveListenPort());
-        startMidiReceivers();
-        connectConfiguredMidiPeers();
-        if (isNMOSIS07() && nmos_auto_discover) discoverNMOSRegistrationServer();
+        udp.stop();
+        udpStarted = udp.begin(getActiveListenPort());
+        if (isNMOSIS07() && nmos_auto_discover) needNmosDiscovery = true;
         if (usesTallyArbiter()) connectToServer();
-        renderScreen();
+        tallyStateChanged = true;
         break;
       case ARDUINO_EVENT_ETH_LOST_IP:
       case ARDUINO_EVENT_ETH_DISCONNECTED:
@@ -4133,12 +4207,18 @@ void setup() {
         battery.isPoE = false;
         if (WiFi.status() != WL_CONNECTED) {
           networkConnected = false;
+          udp.stop();
+          udpStarted = false;
           disconnectFromServer();
         }
-        renderScreen();
+        tallyStateChanged = true;
         break;
       case ARDUINO_EVENT_ETH_STOP:
-        if (WiFi.status() != WL_CONNECTED) networkConnected = false;
+        if (WiFi.status() != WL_CONNECTED) {
+          networkConnected = false;
+          udp.stop();
+          udpStarted = false;
+        }
         break;
       default:
         break;
@@ -4147,52 +4227,46 @@ void setup() {
 
   // Initialize Olimex LAN8720A RMII Ethernet
   logger("[ETH] Initializing Olimex LAN8720A RMII (ADDR=0, MDC=23, MDIO=18, PWR=12, CLK=GPIO0_IN)...", "info");
-  applyNetworkIPConfig();
+  applyNetworkIPConfig(true);
   if (!ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO, ETH_PHY_POWER, ETH_CLK_MODE)) {
     logger("[ETH] ERROR: ETH.begin returned false!", "error");
   }
 
-  // Setup MycilaESPConnect for Wi-Fi / Captive Portal Fallback
+  // Configure MycilaESPConnect callback (started after 7s Ethernet grace window if PoE is absent)
+  espConnect.setAutoRestart(false);
+  espConnect.setBlocking(false);
   espConnect.listen([](Mycila::ESPConnect::State previous, Mycila::ESPConnect::State current) {
+    logger(String("[Network] State: ") + String((int)previous) + " -> " + String((int)current), "info");
     if (current == Mycila::ESPConnect::State::NETWORK_CONNECTED) {
+      if (isEthernetActive() && !wifi_keep_on_with_poe) {
+        ethPrecedenceCheckDue = true;
+        return;
+      }
       networkConnected = true;
-      udp.begin(getActiveListenPort());
-      startMidiReceivers();
-      connectConfiguredMidiPeers();
-      if (isNMOSIS07() && nmos_auto_discover) discoverNMOSRegistrationServer();
+      needNetworkServicesInit = true;
+      logger("[Network] Connected! IP: " + getNetworkIPStr(), "info");
+      udp.stop();
+      udpStarted = udp.begin(getActiveListenPort());
+      if (isNMOSIS07() && nmos_auto_discover) needNmosDiscovery = true;
       if (usesTallyArbiter()) connectToServer();
-      renderScreen();
+      tallyStateChanged = true;
     } else if (current == Mycila::ESPConnect::State::NETWORK_DISCONNECTED && !isEthernetActive()) {
       networkConnected = false;
+      udp.stop();
+      udpStarted = false;
       disconnectFromServer();
-      renderScreen();
+      tallyStateChanged = true;
+    } else if (current == Mycila::ESPConnect::State::PORTAL_TIMEOUT) {
+      logger("[Network] Portal timeout reached; auto-restart prevented. Continuing normal operation.", "info");
     }
   });
 
   setupWebServer();
 
-  espConnect.setBlocking(false);
-  espConnect.begin(listenerDeviceName.c_str(), listenerDeviceName.c_str());
-  if (wifi_ssid.length() > 0 && (!isEthernetActive() || wifi_keep_on_with_poe)) {
-    applyWifiConfig();
-  }
-
-  // Disable ArduinoOTA's internal mDNS responder so it doesn't collide with ESPmDNS on Core 0
-  ArduinoOTA.setMdnsEnabled(false);
-  ArduinoOTA.setHostname(listenerDeviceName.c_str());
-  ArduinoOTA.setPassword("tallyarbiter");
-  ArduinoOTA.begin();
-
-  if (MDNS.begin(mdnsdotlocalurl.c_str())) {
-    MDNS.addService("CueLX", "tcp", 80);
-    MDNS.addService("http", "tcp", 80);
-    uint16_t mDnsPort = getActiveListenPort();
-    MDNS.addService("cuelx-tally", "udp", mDnsPort);
-    MDNS.addServiceTxt("cuelx-tally", "udp", "mode", operatingMode.c_str());
-    MDNS.addServiceTxt("cuelx-tally", "udp", "role", getActiveRoleTag());
-    MDNS.addServiceTxt("cuelx-tally", "udp", "group", pairingGroup.c_str());
-    MDNS.addServiceTxt("cuelx-tally", "udp", "name", listenerDeviceName.c_str());
-    registerAppleMidiMDNS();
+  if (isEthernetActive()) {
+    checkEthernetWifiPrecedence();
+  } else {
+    logger("[ETH] Waiting up to 7s for PoE Ethernet link/IP before starting Wi-Fi fallback...", "info");
   }
 
   last_user_or_tally_act = millis();
@@ -4206,22 +4280,92 @@ void setup() {
 // Main Loop (Core 1: Touch, LCD, Battery, UDP)
 // ==========================================
 void loop() {
-  espConnect.loop();
-  if (networkConnected) {
+  // Delayed Wi-Fi fallback: start MycilaESPConnect only if no Ethernet link came up within 7s
+  if (!espConnectStarted && !isEthernetActive() && !ETH.linkUp() && (millis() - bootStartTimeMs >= 7000)) {
+    startEspConnectFallback();
+  }
+  if (espConnectStarted && !wifiDisabledForEth && (!isEthernetActive() || wifi_keep_on_with_poe)) {
+    espConnect.loop();
+  }
+
+  // Deferred mDNS / OTA / NTP / rtpMIDI startup once an interface holds an active IP
+  if (needNetworkServicesInit && networkConnected) {
+    needNetworkServicesInit = false;
+    startNetworkServices();
+  }
+  if (needNmosDiscovery && networkConnected && servicesStarted) {
+    needNmosDiscovery = false;
+    discoverNMOSRegistrationServer();
+  }
+  if (networkConnected && servicesStarted) {
     ArduinoOTA.handle();
   }
+
+  // Deferred /save side-effect application after HTTP 200 confirmation response has flushed
+  if (needApplySavedConfig && (millis() - savedConfigTimestampMs >= 150)) {
+    needApplySavedConfig = false;
+    if (needRotationApply) {
+      needRotationApply = false;
+      lcd.setRotation(currentRotation);
+      initDoubleBuffer();
+    }
+    applyNetworkIPConfig(false);
+    applyTimezoneConfig();
+    applyPowerManagementConfig();
+
+    if (operatingMode == "TSL_31" && tsl31_transport == "TCP") setupTSLTcpServer(tsl31_port);
+    else if (operatingMode == "TSL_50" && tsl50_transport == "TCP") setupTSLTcpServer(tsl50_port);
+    else if (tslTcpServer != nullptr) {
+      tslTcpServer->end();
+      delete tslTcpServer;
+      tslTcpServer = nullptr;
+    }
+
+    if (networkConnected) {
+      udp.stop();
+      udpStarted = udp.begin(getActiveListenPort());
+      startMidiReceivers();
+      connectConfiguredMidiPeers();
+      if (isNMOSIS07() && nmos_auto_discover) needNmosDiscovery = true;
+      if (isVmix()) vmixReconnectRequested = true;
+    }
+
+    if (servicesStarted) {
+      MDNS.addServiceTxt("cuelx-tally", "udp", "mode", operatingMode.c_str());
+      MDNS.addServiceTxt("cuelx-tally", "udp", "role", getActiveRoleTag());
+      MDNS.addServiceTxt("cuelx-tally", "udp", "group", pairingGroup.c_str());
+      MDNS.addServiceTxt("cuelx-tally", "udp", "name", listenerDeviceName.c_str());
+      registerAppleMidiMDNS();
+    }
+
+    if (usesTallyArbiter()) connectToServer();
+    else disconnectFromServer();
+    tallyStateChanged = true;
+  }
+
   processTouchEvents();
 
-  // Ethernet Precedence check every 500ms
+  // Ethernet Precedence check every 1000ms (or immediately on ETH GOT_IP)
   static unsigned long lastEthPrecedenceCheck = 0;
-  if (millis() - lastEthPrecedenceCheck >= 500) {
+  if (ethPrecedenceCheckDue || (millis() - lastEthPrecedenceCheck >= 1000)) {
+    ethPrecedenceCheckDue = false;
     lastEthPrecedenceCheck = millis();
     checkEthernetWifiPrecedence();
+  }
+
+  // Tally Arbiter Auto-Connect / Keep-Alive Watchdog (thread-safe flag handoff to Core 0)
+  static unsigned long lastTAConnectCheck = 0;
+  if (usesTallyArbiter() && networkConnected && !taSocketConnected) {
+    if (millis() - lastTAConnectCheck >= 3000) {
+      lastTAConnectCheck = millis();
+      connectToServer();
+    }
   }
 
   // Power & Thermal Management: Auto-dim display when idle in Standby/Off
   if (screen_dim_timeout_sec > 0) {
     bool isLiveOnAir = (actualType == "\"program\"" || actualType == "\"preview\"" ||
+                        (isTP() && presenterCueActive) ||
                         cuesystem_ack_active || promptside_state == "go" || msc_state == "go" ||
                         midi_active_red || osc_active_red || nmos_program_active || osccue_state == "go" ||
                         (isVmix() && vmix_tally_val > 0));
